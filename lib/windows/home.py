@@ -443,6 +443,8 @@ class ForeignLibrarySection(object):
     server = None
     key = None
     type = None
+    isMapped = False
+    mappingBroken = False
 
     def __init__(self, server_uuid, section_key, server_name, section_title):
         self.server_uuid = server_uuid
@@ -1105,6 +1107,40 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             'server_name': record.get('server_name'),
             'section_title': record.get('section_title'),
         }), True
+
+    def foreignRailSections(self, manager=None, selected_server_uuid=None):
+        """Resolve the foreign-library config into rail-appendable sections.
+
+        Live sections get their server suffix applied to the display title, matching
+        the placeholder's suffixed title. Records for the currently selected server
+        are skipped (they're already on the rail as normal libraries). Every returned
+        section is marked is_foreign so the render loop can tag it for the UI.
+        """
+        if selected_server_uuid is None:
+            sel = plexapp.SERVERMANAGER.selectedServer
+            selected_server_uuid = sel.uuid if sel else None
+        sections = []
+        for record in self.foreignLibraries():
+            if record.get('server_uuid') == selected_server_uuid:
+                continue
+            section, offline = self.resolveForeignLibrary(record, manager=manager)
+            section.is_foreign = True
+            if not offline:
+                section.title = u'{0} - {1}'.format(
+                    section.title, record.get('server_name'))
+            sections.append(section)
+        return sections
+
+    def isSectionPinnedToHome(self, section):
+        return any(
+            r.get('server_uuid') == section.server.uuid
+            and r.get('section_key') == str(section.key)
+            for r in self.foreignLibraries())
+
+    @staticmethod
+    def _sameRailSection(a, b):
+        """Two rail sections are the same rail item iff their sectionIds match."""
+        return sectionId(a) == sectionId(b)
 
     @staticmethod
     def _findServerByUuid(manager, uuid):
@@ -3118,7 +3154,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.fullyRefreshHome(section=section)
             if section is not None:
                 for mli in self.sectionList:
-                    if mli.dataSource and mli.dataSource.key == section.key:
+                    if mli.dataSource and self._sameRailSection(mli.dataSource, section):
                         self.sectionList.selectItem(mli.pos())
                         self.lastSection = mli.dataSource
             return True
@@ -3337,6 +3373,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
             options.append({'key': 'hide', 'display': T(33028, "Hide library")})
             options.append({'key': 'move', 'display': T(33039, "Move")})
+
+            if section not in (watchlist_section, playlists_section):
+                if self.isSectionPinnedToHome(section):
+                    options.append({'key': 'unpin_from_home', 'display': T(35071, "Remove from home")})
+                else:
+                    options.append({'key': 'pin_to_home', 'display': T(35070, "Pin to home")})
+
             options.append(dropdown.SEPARATOR)
 
             if 'libraries' in util.getSetting('cache_requests') and section != watchlist_section:
@@ -3399,6 +3442,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     return self.lastSection
         elif choice["key"] == "move":
             self.sectionMover(item, "init")
+        elif choice["key"] == "pin_to_home":
+            self.pinForeignLibrary(
+                server_uuid=section.server.uuid,
+                section_key=section.key,
+                server_name=section.server.name or '',
+                section_title=section.title)
+            return section
+        elif choice["key"] == "unpin_from_home":
+            self.unpinForeignLibrary(
+                server_uuid=section.server.uuid,
+                section_key=section.key)
+            return section
         elif choice["key"] == "reset_order":
             if "order" in self.librarySettings:
                 del self.librarySettings["order"]
@@ -4099,6 +4154,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                            and not s.server.DEFER_HUBS]
             backgroundthread.BGThreader.addTasks(self.tasks)
 
+        # foreign libraries: appended after local sorting, so they end up at the end of
+        # the rail; added here (after hub-task scheduling) so they never enter
+        # wantedSections/allSections/the pinned expansion or the hub-task lists - their
+        # hubs aren't fetched this phase
+        sections = sections + self.foreignRailSections()
+
         show_pm_indicator = util.getSetting('path_mapping_indicators')
         for section in sections:
             mli = kodigui.ManagedListItem(section.title,
@@ -4113,6 +4174,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             elif isinstance(section, PinnedTypeSection):
                 # no icon of its own; it keeps the library's type icon
                 mli.setProperty('is.pinned.type', section.itemType)
+            elif isinstance(section, ForeignLibrarySection) or getattr(section, 'is_foreign', None):
+                mli.setProperty('is.foreign', '1')
             if pmm.mapping:
                 # a mapping that doesn't work is an error rather than decoration, so it shows
                 # even when the indicator setting is off
@@ -4214,6 +4277,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
     def _showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):
         if not update:
             self.clearHubs()
+
+        if getattr(section, 'offline', False):
+            # foreign placeholder: server is None, no hubs to fetch
+            return
 
         if not section.server.DEFER_HUBS and not plexapp.SERVERMANAGER.selectedServer.hasHubs():
             return

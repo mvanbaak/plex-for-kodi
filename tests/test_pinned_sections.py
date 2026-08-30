@@ -32,6 +32,9 @@ class FakeServer(object):
     uuid = "SERVERUUID"
     name = "Tower"
 
+    def __init__(self, uuid="SERVERUUID"):
+        self.uuid = uuid
+
 
 class FakeSection(object):
     """Stands in for a plexnet LibrarySection: attributes plus a query that uses its key."""
@@ -41,10 +44,10 @@ class FakeSection(object):
     DEFAULT_SORT = "titleSort"
     DEFAULT_SORT_DESC = False
 
-    def __init__(self, key="3", title="Movies"):
+    def __init__(self, key="3", title="Movies", server_uuid="SERVERUUID"):
         self.key = key
         self.title = title
-        self.server = FakeServer()
+        self.server = FakeServer(server_uuid)
 
     def all(self, *args, **kwargs):
         return "items of section {0}".format(self.key)
@@ -464,6 +467,7 @@ class FakeManager(object):
 class FakeResolvableSection(object):
     key = "1"
     title = "Live Movies"
+    offline = False
 
 
 class ForeignResolutionTest(KodiTestCase):
@@ -518,3 +522,123 @@ class ForeignResolutionTest(KodiTestCase):
             section_title="Movies")
         pin = PinnedTypeSection(ph, "collection")
         self.assertEqual("ZZZZ:9#collection", sectionId(pin))
+
+
+class ForeignPlaceholderHubGuardTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignPlaceholderHubGuardTest, self).setUp()
+        self.win = homeWindow({})
+        # a stripped HomeWindow has no hub controls to clear and no live window
+        # behind it; the busy wrapper's teardown calls setProperty('busy', '')
+        self.win.hubControls = []
+        self.win.setProperty = lambda key, value: None
+
+    def test_placeholder_never_fetches_hubs(self):
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="9", server_name="Away",
+            section_title="Movies")
+        self.win._showHubs(ph)
+
+
+class ForeignRailSectionsTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignRailSectionsTest, self).setUp()
+        self.win = homeWindow({})
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "1",
+             "server_name": "Away", "section_title": "Films"},
+        ]
+
+    def test_unknown_server_yields_a_placeholder(self):
+        manager = FakeManager([])
+        sections = self.win.foreignRailSections(manager=manager,
+                                                selected_server_uuid="LOCAL")
+        self.assertEqual(1, len(sections))
+        ph = sections[0]
+        self.assertTrue(ph.offline)
+        self.assertEqual("Films - Away", ph.title)
+
+    def test_reachable_server_yields_a_live_section_with_suffixed_title(self):
+        live = FakeResolvableSection()
+        class FakeLib(object):
+            def sections(self):
+                return [live]
+        server = FakeServer()
+        server.uuid = "AWAY"  # match the record's foreign server
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        sections = self.win.foreignRailSections(manager=manager,
+                                                selected_server_uuid="LOCAL")
+        self.assertEqual(1, len(sections))
+        self.assertFalse(sections[0].offline)
+        self.assertEqual("Live Movies - Away", sections[0].title)
+        self.assertTrue(getattr(sections[0], 'is_foreign', False))
+
+    def test_record_for_the_selected_server_is_skipped(self):
+        # the selected server's own libraries are already on the rail
+        self.win._foreignLibraries[0]["server_uuid"] = "SERVERUUID"
+        server = FakeServer()
+        class FakeLib(object):
+            def sections(self):
+                return []
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        sections = self.win.foreignRailSections(manager=manager,
+                                                selected_server_uuid="SERVERUUID")
+        self.assertEqual([], sections)
+
+
+class ForeignPlaceholderRenderAttrsTest(KodiTestCase):
+    def test_placeholder_exposes_mapping_attrs(self):
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="9", server_name="Away",
+            section_title="Movies")
+        self.assertFalse(getattr(ph, 'mappingBroken', True))
+        self.assertFalse(getattr(ph, 'isMapped', True))
+
+
+class ForeignPinMenuTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignPinMenuTest, self).setUp()
+        self.win = homeWindow({})
+
+    def test_is_pinable_reports_when_a_section_is_not_yet_pinned(self):
+        server = FakeServer()
+        section = FakeSection()
+        section.server = server
+        self.win._foreignLibraries = [
+            {"server_uuid": "OTHER", "section_key": "9",
+             "server_name": "Away", "section_title": "Series"},
+        ]
+        self.assertFalse(self.win.isSectionPinnedToHome(section))
+
+    def test_is_pinable_reports_when_a_section_is_pinned(self):
+        server = FakeServer()
+        server.uuid = "SERVERUUID"
+        section = FakeSection(key="3")
+        section.server = server
+        self.win._foreignLibraries = [
+            {"server_uuid": "SERVERUUID", "section_key": "3",
+             "server_name": "Tower", "section_title": "Movies"},
+        ]
+        self.assertTrue(self.win.isSectionPinnedToHome(section))
+
+
+class ServerRefreshReselectTest(KodiTestCase):
+    def test_same_rail_section_matches_by_section_id(self):
+        win = homeWindow({})
+        local = FakeSection(key="1")
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="1", server_name="Away",
+            section_title="Movies")
+        # different servers, same key -> not the same rail item
+        self.assertFalse(win._sameRailSection(local, ph))
+        same_ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="1", server_name="Away",
+            section_title="Other")
+        # same server+key, different label -> same rail item
+        self.assertTrue(win._sameRailSection(ph, same_ph))
+        # live resolved foreign section vs its placeholder -> same rail item
+        live = FakeSection(key="1", server_uuid="ZZZZ")
+        self.assertTrue(win._sameRailSection(live, ph))
+
