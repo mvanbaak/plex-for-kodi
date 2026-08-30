@@ -60,6 +60,8 @@ def homeWindow(library_settings):
     """A HomeWindow without Kodi behind it - only the pin bookkeeping is exercised."""
     win = HomeWindow.__new__(HomeWindow)
     win.librarySettings = library_settings
+    win.hubSettings = {}
+    win.sectionHubs = {}
     return win
 
 
@@ -641,4 +643,327 @@ class ServerRefreshReselectTest(KodiTestCase):
         # live resolved foreign section vs its placeholder -> same rail item
         live = FakeSection(key="1", server_uuid="ZZZZ")
         self.assertTrue(win._sameRailSection(live, ph))
+
+
+class _Hub(object):
+    def __init__(self, identifier, **kw):
+        self.hubIdentifier = identifier
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def hub(identifier, **kw):
+    return _Hub(identifier, **kw)
+
+
+class SectionHubsCollisionTest(KodiTestCase):
+    def test_cache_key_collision_safe_across_servers(self):
+        win = homeWindow({})
+        a = FakeSection(key="1", server_uuid="AAA")
+        b = FakeSection(key="1", server_uuid="BBB")
+        self.assertNotEqual(win.cacheKeyForSection(a), win.cacheKeyForSection(b))
+        self.assertEqual(win.cacheKeyForSection(a), "AAA:1")
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="BBB", section_key="1", server_name="Away",
+            section_title="Movies")
+        # a live foreign section and its placeholder resolve to the same cache key
+        self.assertEqual(win.cacheKeyForSection(b), win.cacheKeyForSection(ph))
+
+    def test_virtual_sections_keep_scalar_keys(self):
+        win = homeWindow({})
+        self.assertIsNone(win.cacheKeyForSection(home.home_section))
+        self.assertEqual(win.cacheKeyForSection(home.playlists_section), "playlists")
+
+    def test_cross_server_does_not_leak_or_clobber_hub_cache(self):
+        win = homeWindow({})
+        real = FakeSection(key="1", title="My Adult Movies")
+        foreign = FakeSection(key="1", title="Movies", server_uuid="ZZZZ")
+        win.sectionHubs[win.cacheKeyForSection(real)] = home.HubsList([hub("a")])
+        # foreign section with same wire key never sees the local cache
+        self.assertIsNone(win.sectionHubs.get(win.cacheKeyForSection(foreign)))
+        # writing foreign never clobbers local
+        win.sectionHubs[win.cacheKeyForSection(foreign)] = home.HubsList([hub("b")])
+        self.assertEqual(win.sectionHubs[win.cacheKeyForSection(real)][0].hubIdentifier, "a")
+        self.assertEqual(win.sectionHubs[win.cacheKeyForSection(foreign)][0].hubIdentifier, "b")
+
+
+class ForeignHubSchedulingTest(KodiTestCase):
+    def test_live_foreign_section_gets_hub_task_but_offline_placeholder_does_not(self):
+        from plexnet import plexapp as _plexapp
+        from lib import backgroundthread as _BG
+
+        win = homeWindow({})
+        live = FakeSection(key="1", server_uuid="ZZZZ")
+        live.is_foreign = True
+        offline = home.ForeignLibrarySection.placeholder(
+            server_uuid="WW", section_key="2", server_name="Away", section_title="TV")
+
+        # stub the framework dependencies the helper touches
+        _fake_server = type("FS", (), {"hasHubs": lambda self: True, "uuid": "ZZZZ"})()
+        _orig_sm = getattr(_plexapp, "SERVERMANAGER", None)
+        _plexapp.SERVERMANAGER = type("SM", (), {"selectedServer": _fake_server})()
+        _orig_add = _BG.BGThreader.addTasks
+        _BG.BGThreader.addTasks = lambda tasks: None
+
+        try:
+            win.tasks = []
+            win.wantedSections = None
+            win.scheduleForeignHubFetches([live, offline])
+            scheduled = [t.section for t in win.tasks if hasattr(t, "section")]
+            self.assertIn(live, scheduled)
+            self.assertNotIn(offline, scheduled)
+        finally:
+            _BG.BGThreader.addTasks = _orig_add
+            if _orig_sm is not None:
+                _plexapp.SERVERMANAGER = _orig_sm
+
+
+class OfflineSourceSkipTest(KodiTestCase):
+    def test_fetch_missing_sections_skips_offline_sources(self):
+        win = homeWindow({})
+        win.tasks = []
+        win.wantedSections = None
+        win.allSections = {}
+        offline = home.ForeignLibrarySection.placeholder(
+            server_uuid="WW", section_key="2", server_name="Away", section_title="TV")
+        # source key maps to the offline placeholder in allSections
+        win.allSections[win.cacheKeyForSection(offline)] = offline
+        win.fetchMissingSections([win.cacheKeyForSection(offline)])
+        self.assertEqual(win.tasks, [])  # no task scheduled for offline source
+
+
+class HubConfigKeyTest(KodiTestCase):
+    def test_hub_settings_lookup_uses_foreign_sections_own_id(self):
+        win = homeWindow({})
+        own = FakeSection(key="1", server_uuid="AAA")
+        foreign = FakeSection(key="1", server_uuid="BBB")
+        # a foreign section's hub config key is its own sectionId, distinct from an
+        # own section with the same wire key
+        self.assertNotEqual(win.cacheKeyForSection(own), win.cacheKeyForSection(foreign))
+        self.assertEqual(win.cacheKeyForSection(foreign), "BBB:1")
+
+
+class SectionIdThreadTest(KodiTestCase):
+    def test_all_sections_keyed_by_section_id(self):
+        win = homeWindow({})
+        own = FakeSection(key="1", server_uuid="AAA")
+        foreign = FakeSection(key="1", server_uuid="BBB")
+        # allSections should be keyed by sectionId (cacheKeyForSection)
+        win.allSections = {}
+        win.allSections[str(win.cacheKeyForSection(own))] = own
+        win.allSections[str(win.cacheKeyForSection(foreign))] = foreign
+        self.assertIn("AAA:1", win.allSections)
+        self.assertIn("BBB:1", win.allSections)
+        self.assertNotIn("1", win.allSections)
+
+    def test_get_required_source_sections_uses_section_id(self):
+        win = homeWindow({})
+        win.hubSettings = {
+            "BBB:1": {"custom": True, "hubs": [{"catalog_id": "BBB:1|continueWatching"}]}
+        }
+        # getRequiredSourceSections should accept sectionId and look up by sectionId
+        required = win.getRequiredSourceSections("BBB:1")
+        self.assertIn("BBB:1", required)
+
+    def test_get_enabled_hubs_for_section_uses_section_id(self):
+        win = homeWindow({})
+        win.hubSettings = {
+            "BBB:1": {"custom": True, "hubs": [{"catalog_id": "BBB:1|continueWatching"}]}
+        }
+        enabled = win.getEnabledHubsForSection("BBB:1")
+        self.assertIn("BBB:1|continueWatching", enabled)
+
+    def test_has_cross_section_hubs_uses_section_id(self):
+        win = homeWindow({})
+        win.hubSettings = {
+            "BBB:1": {"custom": True, "hubs": [{"catalog_id": "AAA:1|continueWatching"}]}
+        }
+        self.assertTrue(win.hasCrossSectionHubs("BBB:1"))
+        self.assertFalse(win.hasCrossSectionHubs("AAA:1"))
+
+    def test_fetch_missing_sections_uses_section_id_keys(self):
+        win = homeWindow({})
+        win.tasks = []
+        win.wantedSections = None
+        foreign = FakeSection(key="1", server_uuid="BBB")
+        win.allSections = {str(win.cacheKeyForSection(foreign)): foreign}
+        win.fetchMissingSections(["BBB:1"])
+        self.assertEqual(len(win.tasks), 1)
+        self.assertEqual(win.tasks[0].section, foreign)
+
+    def test_refresh_cross_section_sources_uses_section_id(self):
+        win = homeWindow({})
+        win.tasks = []
+        win.wantedSections = None
+        win.allSections = {}
+        # Source section (AAA:1) that feeds cross-section hubs
+        source_section = FakeSection(key="1", server_uuid="AAA")
+        win.allSections["AAA:1"] = source_section
+        # Target section (BBB:1) that has cross-section config
+        win.hubSettings = {
+            "BBB:1": {"custom": True, "hubs": [{"catalog_id": "AAA:1|continueWatching"}]}
+        }
+        win._refreshCrossSectionSources("BBB:1")
+        # Should schedule a task for the source section (AAA:1)
+        self.assertEqual(len(win.tasks), 1)
+        self.assertEqual(win.tasks[0].section, source_section)
+
+    def test_get_combined_hubs_for_section_uses_section_id(self):
+        win = homeWindow({})
+        win.hubSettings = {}
+        foreign = FakeSection(key="1", server_uuid="BBB")
+        win.allSections = {str(win.cacheKeyForSection(foreign)): foreign}
+        win.sectionHubs = {win.cacheKeyForSection(foreign): home.HubsList([hub("test")])}
+        result = win.getCombinedHubsForSection(foreign)
+        self.assertIsNotNone(result)
+
+
+class CatalogIdRoundTripTest(KodiTestCase):
+    def test_separator_round_trip(self):
+        win = homeWindow({})
+        # real section
+        composed = win.foreignCatalogId("AAAA:1", "continueWatching")
+        src, ident = win.parseCatalogId(composed)
+        self.assertEqual(src, "AAAA:1")
+        self.assertEqual(ident, "continueWatching")
+        # pinned-type sectionId contains '#' and ':'
+        composed = win.foreignCatalogId("AAAA:1#movie", "1:all")
+        src, ident = win.parseCatalogId(composed)
+        self.assertEqual(src, "AAAA:1#movie")
+        self.assertEqual(ident, "1:all")
+        # home has no prefix
+        self.assertEqual(win.parseCatalogId("home.ondeck"), (None, "home.ondeck"))
+
+
+class ForeignPlaceholderReResolveTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignPlaceholderReResolveTest, self).setUp()
+        self.win = homeWindow({})
+        self.win.allSections = {}
+        self.ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="BBB", section_key="1", server_name="Away",
+            section_title="Movies")
+        self.win.allSections[str(self.win.cacheKeyForSection(self.ph))] = self.ph
+        self.win.serverList = []  # guard: onReachableServer loops this when no placeholder path
+
+    def test_reResolve_returns_false_for_unrelated_server(self):
+        self.assertFalse(self.win._reResolveForeignPlaceholders("AAA"))
+
+    def test_reResolve_returns_true_for_matching_server(self):
+        live = FakeResolvableSection()
+        manager = FakeManager([FakeServer(uuid="BBB")])
+
+        def fake_resolve(record, manager=None):
+            return live, False
+
+        self.win.resolveForeignLibrary = fake_resolve
+        self.assertTrue(self.win._reResolveForeignPlaceholders("BBB"))
+
+    def test_reResolve_replaces_placeholder_in_allSections(self):
+        live = FakeResolvableSection()
+        manager = FakeManager([FakeServer(uuid="BBB")])
+
+        def fake_resolve(record, manager=None):
+            return live, False
+
+        self.win.resolveForeignLibrary = fake_resolve
+        key = str(self.win.cacheKeyForSection(self.ph))
+        self.win._reResolveForeignPlaceholders("BBB")
+        self.assertIs(live, self.win.allSections[key])
+        self.assertFalse(self.win.allSections[key].offline)
+
+    def test_onReachableServer_triggers_refresh_for_placeholder_server(self):
+        refresh_called = []
+
+        def fake_refresh(section=None):
+            refresh_called.append(True)
+
+        self.win.serverRefresh = fake_refresh
+        live = FakeResolvableSection()
+
+        def fake_resolve(record, manager=None):
+            return live, False
+
+        self.win.resolveForeignLibrary = fake_resolve
+        server = FakeServer(uuid="BBB")
+        self.win.onReachableServer(server=server)
+        self.assertEqual(1, len(refresh_called))
+
+    def test_onReachableServer_does_not_refresh_for_unrelated_server(self):
+        refresh_called = []
+
+        def fake_refresh(section=None):
+            refresh_called.append(True)
+
+        self.win.serverRefresh = fake_refresh
+        # prevent fallthrough into showServers which needs self.lock
+        self.win.onNewServer = lambda **kw: None
+        server = FakeServer(uuid="AAA")
+        self.win.onReachableServer(server=server)
+        self.assertEqual(0, len(refresh_called))
+
+
+class PersistenceReKeyTest(KodiTestCase):
+    def setUp(self):
+        super(PersistenceReKeyTest, self).setUp()
+        from plexnet import plexapp as _plexapp
+        self._orig_sm = getattr(_plexapp, "SERVERMANAGER", None)
+        _plexapp.SERVERMANAGER = type("SM", (), {"selectedServer": FakeServer("SERVERUUID")})()
+
+    def tearDown(self):
+        from plexnet import plexapp as _plexapp
+        if self._orig_sm is not None:
+            _plexapp.SERVERMANAGER = self._orig_sm
+        super(PersistenceReKeyTest, self).tearDown()
+
+    def test_library_settings_rekeyed_on_load(self):
+        win = homeWindow({})
+        old = {
+            "1": {"show": False},                 # bare key -> sectionId "SERVERUUID:1"
+            "2": {"show": True},
+            "order": ["1", "2", "playlists"],
+            "playlists": {"show": True},
+        }
+        # NOTE: FakeServer uuid is "SERVERUUID"; selectedServer here must be a FakeServer
+        # with uuid "SERVERUUID" for the assertion below.
+        win.librarySettings = win.rekeyLibrarySettings(old)
+        self.assertEqual(win.librarySettings["SERVERUUID:1"]["show"], False)
+        self.assertEqual(win.librarySettings["SERVERUUID:2"]["show"], True)
+        self.assertEqual(win.librarySettings["order"], ["SERVERUUID:1", "SERVERUUID:2", "playlists"])
+        self.assertNotIn("1", win.librarySettings)  # old bare key gone
+
+    def test_hub_settings_rekeyed_on_load(self):
+        win = homeWindow({})
+        old = {
+            "__home__": {"custom": True, "hubs": [{"catalog_id": "home.continue"}]},
+            "1": {"custom": True, "hubs": [{"catalog_id": "1:continueWatching"}]},
+        }
+        win.hubSettings = win.rekeyHubSettings(old)
+        self.assertIn(None, win.hubSettings)
+        self.assertIn("SERVERUUID:1", win.hubSettings)
+        # catalog_id re-keyed to '|' schema
+        hubs = win.hubSettings["SERVERUUID:1"]["hubs"]
+        self.assertTrue(any(h["catalog_id"] == "SERVERUUID:1|continueWatching" for h in hubs))
+
+    def test_library_settings_rekey_is_idempotent(self):
+        win = homeWindow({})
+        already_rekeyed = {
+            "SERVERUUID:1": {"show": False},
+            "SERVERUUID:2": {"show": True},
+            "order": ["SERVERUUID:1", "SERVERUUID:2", "playlists"],
+            "playlists": {"show": True},
+        }
+        first = win.rekeyLibrarySettings(already_rekeyed)
+        second = win.rekeyLibrarySettings(first)
+        self.assertEqual(second, first)
+
+    def test_hub_settings_rekey_is_idempotent(self):
+        win = homeWindow({})
+        already_rekeyed = {
+            None: {"custom": True, "hubs": [{"catalog_id": "home.continue"}]},
+            "SERVERUUID:1": {"custom": True, "hubs": [{"catalog_id": "SERVERUUID:1|continueWatching"}]},
+        }
+        first = win.rekeyHubSettings(already_rekeyed)
+        second = win.rekeyHubSettings(first)
+        self.assertEqual(second, first)
 
