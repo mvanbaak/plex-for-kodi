@@ -432,6 +432,31 @@ def sectionId(section):
     return '{0}:{1}'.format(section.server.uuid, section.key)
 
 
+class ForeignLibrarySection(object):
+    """Stand-in for a foreign library whose server is unknown or unreachable.
+
+    Carries the config record's denormalized labels and an explicit sectionId, so it
+    renders in the rail (suffixed title) and keeps the same identity even with server
+    None. Resolves to a live LibrarySection when the server is reachable.
+    """
+    offline = True
+    server = None
+    key = None
+    type = None
+
+    def __init__(self, server_uuid, section_key, server_name, section_title):
+        self.server_uuid = server_uuid
+        self.section_key = str(section_key)
+        self.server_name = server_name
+        self.section_title = section_title
+        self.title = u'{0} - {1}'.format(section_title, server_name)
+        self.sectionId = u'{0}:{1}'.format(server_uuid, self.section_key)
+
+    @classmethod
+    def placeholder(cls, **kwargs):
+        return cls(**kwargs)
+
+
 class ServerListItem(kodigui.ManagedListItem):
     uuid = None
 
@@ -998,6 +1023,97 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             setting_key = 'home.settings.{}.{}'.format(plexapp.SERVERMANAGER.selectedServer.uuid[-8:],
                                                        plexapp.ACCOUNT.ID)
             util.setSetting(setting_key, json.dumps(self.librarySettings))
+
+    def foreignSettingKey(self):
+        # account scope identical to loadLibrarySettings/loadHubSettings (home.py:1010,1118)
+        return 'home.foreign_libraries.{}'.format(plexapp.ACCOUNT.ID)
+
+    def loadForeignLibraries(self):
+        self._foreignLibraries = []
+        try:
+            data = util.getSetting(self.foreignSettingKey(), '')
+            self._foreignLibraries = json.loads(data) if data else []
+        except ValueError:
+            util.ERROR()
+
+    def saveForeignLibraries(self):
+        util.setSetting(self.foreignSettingKey(), json.dumps(self._foreignLibraries))
+
+    def foreignLibraries(self):
+        if not getattr(self, '_foreignLibraries', None):
+            self.loadForeignLibraries()
+        return self._foreignLibraries
+
+    def pinForeignLibrary(self, server_uuid, section_key, server_name, section_title):
+        libs = self.foreignLibraries()
+        for record in libs:
+            if record.get('server_uuid') == server_uuid and record.get('section_key') == str(section_key):
+                record['server_name'] = server_name
+                record['section_title'] = section_title
+                break
+        else:
+            libs.append({
+                'server_uuid': server_uuid,
+                'section_key': str(section_key),
+                'server_name': server_name,
+                'section_title': section_title,
+            })
+        self.saveForeignLibraries()
+
+    def unpinForeignLibrary(self, server_uuid=None, section_key=None):
+        libs = self.foreignLibraries()
+        before = len(libs)
+        self._foreignLibraries = [
+            r for r in libs
+            if not ((server_uuid is not None and r.get('server_uuid') == server_uuid)
+                    and (section_key is not None and r.get('section_key') == str(section_key)))
+        ]
+        if len(self._foreignLibraries) != before:
+            self.saveForeignLibraries()
+
+    def pruneForeignLibraries(self, known_servers):
+        libs = self.foreignLibraries()
+        self._foreignLibraries = [r for r in libs if r.get('server_uuid') in known_servers]
+        self.saveForeignLibraries()
+        return self._foreignLibraries
+
+    def resolveForeignLibrary(self, record, manager=None):
+        """Resolve a foreign config record to a live section or an offline placeholder.
+
+        Returns (section, offline). Live sections refresh the record's denormalized title.
+        """
+        if manager is None:
+            manager = plexapp.SERVERMANAGER
+        server = self._findServerByUuid(manager, record.get('server_uuid'))
+        if server is None:
+            return ForeignLibrarySection.placeholder(**{
+                'server_uuid': record.get('server_uuid'),
+                'section_key': record.get('section_key'),
+                'server_name': record.get('server_name'),
+                'section_title': record.get('section_title'),
+            }), True
+        try:
+            for section in server.library.sections():
+                if str(section.key) == str(record.get('section_key')):
+                    record['section_title'] = section.title
+                    return section, False
+        except Exception:
+            util.ERROR()
+        return ForeignLibrarySection.placeholder(**{
+            'server_uuid': record.get('server_uuid'),
+            'section_key': record.get('section_key'),
+            'server_name': record.get('server_name'),
+            'section_title': record.get('section_title'),
+        }), True
+
+    @staticmethod
+    def _findServerByUuid(manager, uuid):
+        if manager is None or not uuid:
+            return None
+        for server in manager.getServers():
+            if getattr(server, 'uuid', None) == uuid:
+                return server
+        return None
 
     def loadHubSettings(self):
         setting_key = 'hub.settings.{}.{}'.format(plexapp.SERVERMANAGER.selectedServer.uuid[-8:], plexapp.ACCOUNT.ID)

@@ -360,3 +360,161 @@ class SectionIdentityTest(KodiTestCase):
         section = FakeSection(key="9", title="Movies")
         section.sectionId = "ZZZZ:9"
         self.assertEqual("ZZZZ:9", sectionId(section))
+
+
+class ForeignLibraryConfigTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignLibraryConfigTest, self).setUp()
+        from plexnet import plexapp as _plexapp
+        self._orig_account = _plexapp.ACCOUNT
+        _plexapp.ACCOUNT = type("FakeAccount", (), {"ID": "TESTACCOUNT"})()
+        self.win = homeWindow({})
+
+    def tearDown(self):
+        from plexnet import plexapp as _plexapp
+        _plexapp.ACCOUNT = self._orig_account
+        super(ForeignLibraryConfigTest, self).tearDown()
+
+    def pin(self, server_uuid="SERVERUUID", section_key="1", name="Away",
+            title="Movies", win=None):
+        # real saveForeignLibraries writes ENV.settings via util.setSetting;
+        # each KodiTestCase.setUp resets ENV so a test starts from a clean setting
+        win = win or self.win
+        win.pinForeignLibrary(server_uuid, section_key, name, title)
+        return win
+
+    def test_pin_creates_a_foreign_record(self):
+        self.pin()
+        self.assertEqual([{
+            "server_uuid": "SERVERUUID", "section_key": "1",
+            "server_name": "Away", "section_title": "Movies",
+        }], self.win.foreignLibraries())
+
+    def test_pinning_the_same_foreign_library_twice_dedupes(self):
+        self.pin()
+        self.pin()
+        self.assertEqual(1, len(self.win.foreignLibraries()))
+
+    def test_two_foreign_libraries_with_same_key_on_different_servers_both_stay(self):
+        self.pin(server_uuid="AAA")
+        self.pin(server_uuid="BBB", name="Other")
+        self.assertEqual(2, len(self.win.foreignLibraries()))
+
+    def test_unpin_removes_by_server_and_key(self):
+        self.pin(server_uuid="AAA")
+        self.pin(server_uuid="BBB", name="Other")
+        self.win.unpinForeignLibrary(server_uuid="AAA", section_key="1")
+        got = [r["server_uuid"] for r in self.win.foreignLibraries()]
+        self.assertEqual(["BBB"], got)
+
+    def test_unpin_for_a_missing_record_is_a_no_op(self):
+        self.pin(server_uuid="AAA")
+        self.win.unpinForeignLibrary(server_uuid="NOPE", section_key="1")
+        self.assertEqual(1, len(self.win.foreignLibraries()))
+
+    def test_prune_drops_records_for_unknown_servers(self):
+        self.pin(server_uuid="AAA")
+        self.pin(server_uuid="BBB", name="Other")
+        pruned = self.win.pruneForeignLibraries(known_servers={"AAA"})
+        surviving = [r["server_uuid"] for r in pruned]
+        self.assertEqual(["AAA"], surviving)
+
+    def test_unpin_with_only_one_filter_is_a_safe_noop(self):
+        # AND semantics: both server and key must match to remove
+        self.pin(server_uuid="AAA")
+        self.pin(server_uuid="BBB", name="Other")
+        self.win.unpinForeignLibrary(server_uuid="AAA")          # uuid only
+        self.win.unpinForeignLibrary(section_key="1")            # key only
+        self.assertEqual(2, len(self.win.foreignLibraries()))
+
+    def test_foreign_libraries_are_stored_under_the_account_scoped_key(self):
+        self.pin()
+        self.assertIn("home.foreign_libraries.TESTACCOUNT", ENV.settings)
+        stored = json.loads(ENV.settings["home.foreign_libraries.TESTACCOUNT"])
+        self.assertEqual([{
+            "server_uuid": "SERVERUUID", "section_key": "1",
+            "server_name": "Away", "section_title": "Movies",
+        }], stored)
+
+
+class ForeignLibrarySectionTest(KodiTestCase):
+    def test_placeholder_identity_comes_from_the_record_not_a_server(self):
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="9", server_name="Away",
+            section_title="Movies")
+        self.assertIsNone(ph.server)
+        self.assertTrue(ph.offline)
+        self.assertEqual("ZZZZ:9", sectionId(ph))
+
+    def test_placeholder_title_is_suffixed(self):
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="9", server_name="Away",
+            section_title="Movies")
+        self.assertEqual("Movies - Away", ph.title)
+
+
+class FakeManager(object):
+    def __init__(self, servers):
+        self.servers = servers
+
+    def getServers(self):
+        return self.servers
+
+
+class FakeResolvableSection(object):
+    key = "1"
+    title = "Live Movies"
+
+
+class ForeignResolutionTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignResolutionTest, self).setUp()
+        self.win = homeWindow({})
+
+    def test_unknown_server_resolves_to_a_placeholder(self):
+        manager = FakeManager([])
+        section, offline = self.win.resolveForeignLibrary(
+            {"server_uuid": "NOPE", "section_key": "1",
+             "server_name": "Away", "section_title": "Movies"},
+            manager=manager)
+        self.assertTrue(offline)
+        self.assertIsNone(section.server)
+
+    def test_match_by_key_resolves_to_a_live_section(self):
+        live = FakeResolvableSection()
+
+        class FakeLib(object):
+            def sections(self):
+                return [live]
+
+        server = FakeServer()
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        record = {"server_uuid": "SERVERUUID", "section_key": "1",
+                  "server_name": "Away", "section_title": "Movies"}
+        section, offline = self.win.resolveForeignLibrary(record, manager=manager)
+        self.assertFalse(offline)
+        self.assertIs(section, live)
+        # live match refreshes the denormalized title
+        self.assertEqual("Live Movies", record["section_title"])
+
+    def test_no_section_match_on_a_known_server_resolves_to_a_placeholder(self):
+        class FakeLib(object):
+            def sections(self):
+                return []
+        server = FakeServer()
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        section, offline = self.win.resolveForeignLibrary(
+            {"server_uuid": "SERVERUUID", "section_key": "99",
+             "server_name": "Away", "section_title": "Movies"},
+            manager=manager)
+        self.assertTrue(offline)
+
+    def test_a_pin_over_a_placeholder_keeps_its_item_type_suffix(self):
+        # regression for the Task-1 code review: PinnedTypeSection must win over sectionId
+        ph = home.ForeignLibrarySection.placeholder(
+            server_uuid="ZZZZ", section_key="9", server_name="Away",
+            section_title="Movies")
+        pin = PinnedTypeSection(ph, "collection")
+        self.assertEqual("ZZZZ:9#collection", sectionId(pin))
