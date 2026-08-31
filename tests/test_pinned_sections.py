@@ -65,6 +65,8 @@ def homeWindow(library_settings):
     win.librarySettings = library_settings
     win.hubSettings = {}
     win.sectionHubs = {}
+    win.lock = threading.RLock()
+    win._cwRetryPending = set()
     return win
 
 
@@ -1423,3 +1425,50 @@ class ForeignCwWiringTest(KodiTestCase):
         xbmc.Player.playing_video = False
         self.win.tick()
         self.assertEqual([True], flushed)
+
+
+class ForeignCwUnpinTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignCwUnpinTest, self).setUp()
+        self.win = homeWindow({})
+        self.win.lock = threading.RLock()
+        self.win.hubControls = None
+        self.win._cwRetryPending = {"AWAY"}
+        self.win.saveForeignLibraries = lambda: None
+        self.win.saveLibrarySettings = lambda: None
+
+    def test_remove_cw_items_for_server(self):
+        from lib.windows.home import removeCwItemsForServer
+        hub = _Hub('continueWatching')
+        hub.items = [cwItem(1, "LOCAL"), cwItem(2, "AWAY"), cwItem(3, "AWAY"), cwItem(4, "OTHER")]
+        removed = removeCwItemsForServer(hub, "AWAY")
+        self.assertEqual(2, removed)
+        self.assertEqual({1, 4}, {i.ratingKey for i in hub.items})
+
+    def test_unpin_last_lib_drops_cw_and_clears_retry(self):
+        # AWAY has 1 pinned lib; unpinning it -> no libs left for AWAY
+        self.win._foreignLibraries = [
+            {'server_uuid': 'AWAY', 'section_key': '2', 'server_name': 'A', 'section_title': 'Y'},
+            {'server_uuid': 'OTHER', 'section_key': '3', 'server_name': 'O', 'section_title': 'Z'},
+        ]
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL"), cwItem(2, "AWAY")]
+        self.win.sectionHubs[None] = [local]
+        # unpin AWAY's only lib (now AWAY has none)
+        self.win.unpinForeignLibrary("AWAY", "2")
+        self.assertNotIn("AWAY", self.win._cwRetryPending)
+        remaining = {i.ratingKey for i in local.items}
+        self.assertNotIn(2, remaining)   # AWAY's CW item removed
+        self.assertIn(1, remaining)      # LOCAL item kept
+
+    def test_unpin_still_has_other_lib_keeps_cw(self):
+        self.win._foreignLibraries = [
+            {'server_uuid': 'AWAY', 'section_key': '1', 'server_name': 'A', 'section_title': 'X'},
+            {'server_uuid': 'AWAY', 'section_key': '2', 'server_name': 'A', 'section_title': 'Y'},
+        ]
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL"), cwItem(2, "AWAY")]
+        self.win.sectionHubs[None] = [local]
+        self.win.unpinForeignLibrary("AWAY", "1")   # AWAY still has lib '2'
+        self.assertIn(2, {i.ratingKey for i in local.items})   # CW kept
+        self.assertIn("AWAY", self.win._cwRetryPending)  # retry state untouched

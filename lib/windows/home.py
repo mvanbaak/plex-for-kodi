@@ -104,6 +104,23 @@ def mergeCwItems(home_cw, foreign_items):
     return added
 
 
+def removeCwItemsForServer(home_cw, server_uuid):
+    """Drop a server's items from the merged Home CW hub; returns how many were removed."""
+    if home_cw is None or not server_uuid:
+        return 0
+    kept = []
+    removed = 0
+    for it in home_cw.items:
+        server = getattr(it, 'server', None)
+        if getattr(server, 'uuid', None) == server_uuid:
+            removed += 1
+            continue
+        kept.append(it)
+    if removed:
+        home_cw.items = kept
+    return removed
+
+
 class SectionHubsTask(backgroundthread.Task):
     def setup(self, section, callback, section_keys=None, reselect_pos_dict=None):
         self.section = section
@@ -1214,6 +1231,24 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 if order and sid in order:
                     self.librarySettings['order'].remove(sid)
                     self.saveLibrarySettings()
+
+        # A server with no remaining pinned libs no longer contributes CW to the merged
+        # Home hub: drop its items immediately and forget any pending retry.
+        if server_uuid is not None and not any(
+                lib.get('server_uuid') == server_uuid for lib in self._foreignLibraries):
+            self._dropForeignCwServer(server_uuid)
+
+    def _dropForeignCwServer(self, server_uuid):
+        """Remove one server's CW items from the merged Home hub and its retry state."""
+        with self.lock:
+            pending = getattr(self, '_cwRetryPending', None)
+            if pending is not None:
+                pending.discard(server_uuid)
+            hubs = self.sectionHubs.get(None)
+            home_cw = cwHubFrom(hubs)
+            if home_cw is not None and removeCwItemsForServer(home_cw, server_uuid):
+                if getattr(self, 'hubControls', None) is not None:
+                    self.updateHubCallback(home_cw, items=home_cw.items)
 
     def pruneForeignLibraries(self, known_servers):
         libs = self.foreignLibraries()
