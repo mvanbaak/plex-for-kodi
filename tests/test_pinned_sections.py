@@ -1288,6 +1288,27 @@ class ForeignCwMergeTest(KodiTestCase):
         self.assertEqual(0, mergeCwItems(local, None))
         self.assertEqual(0, mergeCwItems(None, [cwItem(1, "X")]))
 
+    def test_merge_sort_by_recency_ties_keep_arrival_order(self):
+        from lib.windows.home import mergeCwItems
+        local = _Hub('continueWatching')
+        old = cwItem(1, "LOCAL")
+        old.lastViewedAt = 100
+        local.items = [old]
+        foreign = [cwItem(2, "AWAY"), cwItem(3, "AWAY")]
+        foreign[0].lastViewedAt = 300
+        foreign[1].lastViewedAt = 200
+        added = mergeCwItems(local, foreign)
+        self.assertEqual(2, added)
+        self.assertEqual([2, 3, 1], [i.ratingKey for i in local.items])
+
+    def test_merge_no_resort_when_nothing_added(self):
+        from lib.windows.home import mergeCwItems
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL")]
+        before = list(local.items)
+        self.assertEqual(0, mergeCwItems(local, [cwItem(1, "LOCAL")]))
+        self.assertIs(before[0], local.items[0])
+
 
 class ForeignCwHandlersTest(KodiTestCase):
     def setUp(self):
@@ -1332,6 +1353,34 @@ class ForeignCwHandlersTest(KodiTestCase):
         self.win._cwRetryPending = set()
         self.win._onForeignCw(FakeServer("AWAY"), None, False)
         self.assertIn("AWAY", self.win._cwRetryPending)
+
+    def test_apply_store_survives_home_refetch(self):
+        from lib.windows.home import cwHubFrom
+        first = _Hub('continueWatching')
+        first.items = [cwItem(1, "LOCAL")]
+        self.win.sectionHubs[None] = [first]
+        f = _Hub('home.continue')
+        f.items = [cwItem(2, "AWAY")]
+        self.win._onForeignCw(FakeServer("AWAY"), f, True)
+        self.assertEqual({1, 2}, {i.ratingKey for i in first.items})
+        # simulate a home-hub refetch replacing sectionHubs[None] with a fresh hub
+        fresh = _Hub('continueWatching')
+        fresh.items = [cwItem(1, "LOCAL")]
+        self.win.sectionHubs[None] = [fresh]
+        self.assertTrue(self.win._applyForeignCwStore(cwHubFrom(self.win.sectionHubs[None])))
+        self.assertEqual({1, 2}, {i.ratingKey for i in fresh.items})
+
+    def test_apply_store_reapply_is_idempotent(self):
+        from lib.windows.home import cwHubFrom
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL")]
+        self.win.sectionHubs[None] = [local]
+        f = _Hub('home.continue')
+        f.items = [cwItem(2, "AWAY")]
+        self.win._onForeignCw(FakeServer("AWAY"), f, True)
+        self.assertEqual({1, 2}, {i.ratingKey for i in local.items})
+        self.assertFalse(self.win._applyForeignCwStore(local))
+        self.assertEqual({1, 2}, {i.ratingKey for i in local.items})
 
     def test_schedule_pref_off_dispatches_nothing(self):
         self._values["hubs_use_new_continue_watching"] = False

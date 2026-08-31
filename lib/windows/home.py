@@ -84,8 +84,20 @@ def cwHubFrom(hubs, is_home=True):
     return None
 
 
+def _cwViewedAt(it):
+    """Sort key for CW recency: lastViewedAt (epoch seconds), 0 if absent."""
+    try:
+        return int(getattr(it, 'lastViewedAt', None) or 0)
+    except Exception:
+        return 0
+
+
 def mergeCwItems(home_cw, foreign_items):
-    """Append foreign CW items to the home CW hub, deduping by (server.uuid, ratingKey)."""
+    """Merge foreign CW items into the home CW hub, deduping by (server.uuid, ratingKey).
+
+    Reorders the merged items by recency (lastViewedAt desc) so foreign items slot into
+    the same date-ready list instead of being dumped at the end.
+    """
     if not foreign_items or home_cw is None:
         return 0
     existing = set()
@@ -101,6 +113,9 @@ def mergeCwItems(home_cw, foreign_items):
         existing.add(key)
         home_cw.items.append(it)
         added += 1
+    if added:
+        # stable: Plex CW hub is ordered by recency; tie-broken by arrival order
+        home_cw.items.sort(key=_cwViewedAt, reverse=True)
     return added
 
 
@@ -1244,6 +1259,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             pending = getattr(self, '_cwRetryPending', None)
             if pending is not None:
                 pending.discard(server_uuid)
+            store = getattr(self, '_foreignCwStore', None)
+            if store is not None and server_uuid in store:
+                del store[server_uuid]
             hubs = self.sectionHubs.get(None)
             home_cw = cwHubFrom(hubs)
             if home_cw is not None and removeCwItemsForServer(home_cw, server_uuid):
@@ -1451,7 +1469,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             backgroundthread.BGThreader.addTasks(tasks)
 
     def _onForeignCw(self, server, hub, ok):
-        """Merge a foreign CW hub's items into the Home CW hub and re-draw the row."""
+        """Merge a foreign CW hub's items into the Home CW hub and re-draw the row.
+
+        Fetched foreign items are also kept in a stable store so a later home-hub
+        refetch (which replaces sectionHubs[None] with fresh local-only items) can
+        re-apply them instead of silently dropping foreign entries.
+        """
         with self.lock:
             pending_set = getattr(self, '_cwRetryPending', None)
             if pending_set is None:
@@ -1462,13 +1485,28 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 return
             if server is not None:
                 pending_set.discard(server.uuid)
+            store = getattr(self, '_foreignCwStore', None)
+            if store is None:
+                store = self._foreignCwStore = {}
+            if server is not None:
+                store[server.uuid] = list(getattr(hub, 'items', None) or ())
             hubs = self.sectionHubs.get(None)
             home_cw = cwHubFrom(hubs)
-            if home_cw is None or hub is None:
+            if home_cw is None:
                 return
-            if mergeCwItems(home_cw, getattr(hub, 'items', ())):
+            if self._applyForeignCwStore(home_cw):
                 if getattr(self, 'hubControls', None) is not None:
                     self.updateHubCallback(home_cw, items=home_cw.items)
+
+    def _applyForeignCwStore(self, home_cw):
+        """Re-apply all stored foreign CW items onto home_cw; returns True if any added."""
+        store = getattr(self, '_foreignCwStore', None)
+        if not store:
+            return False
+        all_items = []
+        for items in store.values():
+            all_items.extend(items)
+        return mergeCwItems(home_cw, all_items) > 0
 
     def _flushCwRetry(self):
         """Retry foreign CW fetches that were transiently pending (slow/unreachable).
@@ -4387,6 +4425,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             sorted_hubs.identifier = hubs.identifier
 
             self.sectionHubs[ck] = sorted_hubs
+
+            if is_home:
+                self._applyForeignCwStore(cwHubFrom(sorted_hubs))
             self.setBoolProperty('loading.content', False)
 
             on_home = self.lastSection and self.lastSection.key is None
