@@ -1150,3 +1150,20 @@ class PersistenceReKeyTest(KodiTestCase):
         second = win.rekeyHubSettings(first)
         self.assertEqual(second, first)
 
+
+class CwHubHelperTest(KodiTestCase):
+    def test_finds_merged_and_legacy_cw_hubs(self):
+        from lib.windows.home import cwHubFrom
+        class H(object):
+            def __init__(self, ident):
+                self.hubIdentifier = ident
+            def getCleanHubIdentifier(self, is_home=False):
+                return self.hubIdentifier.replace('.1', '')
+        mixed = [H('tv.inprogress.1'), H('continueWatching'), H('movie.newlyreleased')]
+        self.assertIs(cwHubFrom(mixed), mixed[1])
+        legacy = [H('movie.newlyreleased'), H('home.continue'), H('movie.recentlyviewed.1')]
+        self.assertIs(cwHubFrom(legacy), legacy[1])
+        absent = [H('movie.newlyreleased'), H('movie.recentlyviewed.1')]
+        self.assertIsNone(cwHubFrom(absent))
+        self.assertIsNone(cwHubFrom([]))
+

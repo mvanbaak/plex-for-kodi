@@ -53,6 +53,8 @@ MOVE_SET = frozenset(
 
 NO_HUB = "__NO_HUB__"
 
+CW_HUB_IDS = frozenset(('continueWatching', 'home.continue', 'home.ondeck'))
+
 PLAYLIST_HUB_TITLES = {
     'playlists.audio': T(34094, 'Audio Playlists'),
     'playlists.video': T(34095, 'Video Playlists'),
@@ -65,6 +67,21 @@ class HubsList(list):
         self.invalid = False
         return self
 
+
+def cwHubFrom(hubs, is_home=True):
+    """Return the Continue Watching Hub from a HubsList, or None if absent."""
+    if not hubs:
+        return None
+    for hub in hubs:
+        ident = getattr(hub, 'hubIdentifier', None)
+        if not ident:
+            continue
+        if ident in CW_HUB_IDS:
+            return hub
+        clean = hub.getCleanHubIdentifier(is_home=is_home) if hasattr(hub, 'getCleanHubIdentifier') else None
+        if clean in CW_HUB_IDS:
+            return hub
+    return None
 
 
 class SectionHubsTask(backgroundthread.Task):
