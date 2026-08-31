@@ -1354,6 +1354,31 @@ class ForeignCwHandlersTest(KodiTestCase):
         self.win._onForeignCw(FakeServer("AWAY"), None, False)
         self.assertIn("AWAY", self.win._cwRetryPending)
 
+    def test_onForeignCw_defers_redraw_until_debounce_and_coalesces_burst(self):
+        from lib.windows.home import cwHubFrom
+        self.win.hubControls = [object()]
+        rendered = []
+        self.win.updateHubCallback = (
+            lambda hub, items=None, reselect_pos=None: rendered.append(1))
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL")]
+        self.win.sectionHubs[None] = [local]
+        self.win._cwRetryPending = set()
+        # a burst of foreign servers landing within the settle window
+        for i, srv in enumerate(("A", "B", "C")):
+            f = _Hub('home.continue')
+            f.items = [cwItem(10 + i, srv)]
+            self.win._onForeignCw(FakeServer(srv), f, True)
+        # data merged immediately (no per-server flash), but no render yet
+        self.assertEqual(
+            {1, 10, 11, 12}, {i.ratingKey for i in cwHubFrom(self.win.sectionHubs[None]).items})
+        t = getattr(self.win, '_cwRedrawThread', None)
+        self.assertIsNotNone(t)
+        t.join(timeout=2)
+        # the whole burst coalesced into one trailing-edge redraw
+        self.assertEqual(1, len(rendered))
+        self.win.hubControls = None
+
     def test_apply_store_survives_home_refetch(self):
         from lib.windows.home import cwHubFrom
         first = _Hub('continueWatching')

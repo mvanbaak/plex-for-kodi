@@ -34,6 +34,7 @@ HUBS_REFRESH_INTERVAL = 300  # 5 Minutes
 REACHABILITY_CHECK_INTERVAL = 600  # 10 Minutes
 PATH_MAPPING_PROBE_INTERVAL = 60  # 1 Minute
 HUB_PAGE_SIZE = 10
+CW_REDRAW_DEBOUNCE = 0.3  # seconds to coalesce a burst of foreign CW merges before redrawing
 
 MOVE_SET = frozenset(
     (
@@ -1495,8 +1496,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             if home_cw is None:
                 return
             if self._applyForeignCwStore(home_cw):
-                if getattr(self, 'hubControls', None) is not None:
-                    self.updateHubCallback(home_cw, items=home_cw.items)
+                self._scheduleCwRedraw(home_cw)
 
     def _applyForeignCwStore(self, home_cw):
         """Re-apply all stored foreign CW items onto home_cw; returns True if any added."""
@@ -1507,6 +1507,38 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         for items in store.values():
             all_items.extend(items)
         return mergeCwItems(home_cw, all_items) > 0
+
+    def _scheduleCwRedraw(self, home_cw):
+        """Trailing-edge debounce of the Home CW row redraw.
+
+        A burst of foreign merges (one per server) lands within a settle window; each
+        bumps the deadline so the row is redrawn exactly once, after they settle, when
+        the merged list is fully recency-sorted -- avoiding a per-server mid-list flash.
+        """
+        with self.lock:
+            self._cwRedrawDeadline = time.time() + CW_REDRAW_DEBOUNCE
+            self._cwRedrawHub = home_cw
+            thread = getattr(self, '_cwRedrawThread', None)
+            if thread is not None and thread.is_alive():
+                return
+            self._cwRedrawThread = threading.Thread(
+                target=self._cwRedrawLoop, name='cw-redraw', daemon=True)
+            self._cwRedrawThread.start()
+
+    def _cwRedrawLoop(self):
+        while True:
+            with self.lock:
+                deadline = getattr(self, '_cwRedrawDeadline', 0)
+                hub = getattr(self, '_cwRedrawHub', None)
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                with self.lock:
+                    self._cwRedrawDeadline = 0
+                    self._cwRedrawHub = None
+                if hub is not None and getattr(self, 'hubControls', None) is not None:
+                    self.updateHubCallback(hub, items=hub.items)
+                return
+            util.MONITOR.waitFor(min(remaining, 0.2))
 
     def _flushCwRetry(self):
         """Retry foreign CW fetches that were transiently pending (slow/unreachable).
