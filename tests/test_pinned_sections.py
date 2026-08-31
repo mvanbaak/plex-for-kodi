@@ -1151,6 +1151,57 @@ class PersistenceReKeyTest(KodiTestCase):
         self.assertEqual(second, first)
 
 
+class ForeignCwServerSetTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignCwServerSetTest, self).setUp()
+        from lib.windows import home as home_mod
+        self.home_mod = home_mod
+        self.win = homeWindow({})
+        self._orig_sm = home_mod.plexapp.SERVERMANAGER
+        home_mod.plexapp.SERVERMANAGER = type(
+            "FakeServerManager", (), {"selectedServer": FakeServer("LOCAL")})()
+
+    def tearDown(self):
+        self.home_mod.plexapp.SERVERMANAGER = self._orig_sm
+        super(ForeignCwServerSetTest, self).tearDown()
+
+    def _servers(self):
+        a = FakeServer("LOCAL")
+        b = FakeServer("AWAY")
+        c = FakeServer("FAR")
+        manager = FakeManager([a, b, c])
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "1", "server_name": "Away", "section_title": "Movies"},
+            {"server_uuid": "AWAY", "section_key": "2", "server_name": "Away", "section_title": "TV"},
+            {"server_uuid": "FAR", "section_key": "3", "server_name": "Far", "section_title": "Docs"},
+        ]
+        self.home_mod.plexapp.SERVERMANAGER.selectedServer = a
+        return manager
+
+    def test_returns_pinned_foreign_servers_only_deduped(self):
+        manager = self._servers()
+        live, pending = self.win._foreignCwServers(manager, selected_server_uuid="LOCAL")
+        self.assertEqual(["AWAY", "FAR"], [s.uuid for s in live])
+        self.assertEqual([], pending)
+
+    def test_excludes_selected_server(self):
+        manager = self._servers()
+        self.win._foreignLibraries.append(
+            {"server_uuid": "LOCAL", "section_key": "9", "server_name": "Local", "section_title": "X"})
+        live, pending = self.win._foreignCwServers(manager, selected_server_uuid="LOCAL")
+        self.assertEqual(["AWAY", "FAR"], [s.uuid for s in live])
+        self.assertEqual([], pending)
+
+    def test_unresolvable_server_is_pending_not_crashed(self):
+        manager = FakeManager([FakeServer("LOCAL")])
+        self.win._foreignLibraries = [
+            {"server_uuid": "GONE", "section_key": "1", "server_name": "Gone", "section_title": "Y"}]
+        self.home_mod.plexapp.SERVERMANAGER.selectedServer = FakeServer("LOCAL")
+        live, pending = self.win._foreignCwServers(manager, selected_server_uuid="LOCAL")
+        self.assertEqual([], live)
+        self.assertEqual(["GONE"], pending)
+
+
 class CwHubHelperTest(KodiTestCase):
     def test_finds_merged_and_legacy_cw_hubs(self):
         from lib.windows.home import cwHubFrom

@@ -1420,6 +1420,31 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 return server
         return None
 
+    def _foreignCwServers(self, manager=None, selected_server_uuid=None):
+        """Servers whose CW feeds the merged Home hub: the selected server's is fetched via
+        the existing home hub path; foreign pinned servers (deduped, in pin order) are
+        returned here. Unresolvable server uuids are returned as pending for retry."""
+        if manager is None:
+            manager = plexapp.SERVERMANAGER
+        if selected_server_uuid is None:
+            sel = plexapp.SERVERMANAGER.selectedServer
+            selected_server_uuid = sel.uuid if sel else None
+
+        seen = set()
+        live = []
+        pending = []
+        for record in self.foreignLibraries():
+            uuid = record.get('server_uuid')
+            if not uuid or uuid == selected_server_uuid or uuid in seen:
+                continue
+            seen.add(uuid)
+            server = self._findServerByUuid(manager, uuid)
+            if server is None:
+                pending.append(uuid)
+            else:
+                live.append(server)
+        return live, pending
+
     def loadHubSettings(self):
         setting_key = 'hub.settings.{}.{}'.format(plexapp.SERVERMANAGER.selectedServer.uuid[-8:], plexapp.ACCOUNT.ID)
         data = util.getSetting(setting_key, '')
