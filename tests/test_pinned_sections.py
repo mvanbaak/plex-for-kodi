@@ -1212,6 +1212,22 @@ class ForeignCwServerSetTest(KodiTestCase):
         self.assertEqual([], live)
         self.assertEqual(["GONE"], pending)
 
+    def test_offline_server_is_pending_not_dispatched(self):
+        off = FakeServer("AWAY")
+        off.isReachable = lambda: False
+        liveok = FakeServer("FAR")
+        liveok.isReachable = lambda: True
+        manager = FakeManager([off, liveok])
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "1", "server_name": "Away", "section_title": "X"},
+            {"server_uuid": "FAR", "section_key": "3", "server_name": "Far", "section_title": "Y"},
+        ]
+        self.home_mod.plexapp.SERVERMANAGER.selectedServer = FakeServer("LOCAL")
+        live, pending = self.win._foreignCwServers(manager, selected_server_uuid="LOCAL")
+        # offline server held for retry, never dispatched; live one fetches
+        self.assertEqual(["FAR"], [s.uuid for s in live])
+        self.assertEqual(["AWAY"], pending)
+
 
 class CwHubHelperTest(KodiTestCase):
     def test_finds_merged_and_legacy_cw_hubs(self):

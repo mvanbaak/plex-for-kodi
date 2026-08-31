@@ -1589,6 +1589,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             server = self._findServerByUuid(manager, uuid)
             if server is None:
                 pending.append(uuid)
+            elif not getattr(server, 'isReachable', lambda: True)():
+                # offline/unreachable: hold for retry instead of blocking a worker
+                # on a network call that will hang behind the DEFAULT_TIMEOUT.
+                pending.append(uuid)
             else:
                 live.append(server)
         return live, pending
