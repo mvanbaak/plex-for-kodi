@@ -103,6 +103,45 @@ class SectionHubsTask(backgroundthread.Task):
             self.callback(self.section, hubs)
 
 
+class ResolveForeignTask(backgroundthread.Task):
+    """Resolve un-cached foreign-library records off the GUI thread.
+
+    Fills the per-sectionId resolution cache with (section, offline); live results let
+    the callback upgrade placeholders -> live and refresh the rail.
+    """
+
+    def setup(self, win, records, manager=None):
+        self.win = win
+        self.records = records
+        self.manager = manager
+        return self
+
+    def run(self):
+        if self.isCanceled() or not self.records:
+            return
+        self._resolve_records()
+        self.win._onForeignResolved()
+
+    def _resolve_records(self):
+        """Resolve un-cached records into the cache. Only LIVE results are cached: an
+        offline result (server not connected yet, a false-negative at startup) is left
+        uncached so a later pass re-resolves and can upgrade the placeholder."""
+        upgraded = False
+        for record in self.records:
+            if self.isCanceled():
+                break
+            key = u'{0}:{1}'.format(record.get('server_uuid'), record.get('section_key'))
+            cache = getattr(self.win, '_foreignResolved', None) or {}
+            if key in cache:
+                continue  # already resolved (live) this session
+            section, offline = self.win.resolveForeignLibrary(record, manager=self.manager)
+            if offline:
+                continue  # don't cache a transient false-negative; retry next pass
+            self.win._foreignResolved[key] = (section, offline)
+            upgraded = True
+        return upgraded
+
+
 class PinnedTypeHubsTask(backgroundthread.Task):
     """Builds the one hub a pinned item-type view shows: the library's collections."""
 
@@ -1141,19 +1180,35 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
     def foreignRailSections(self, manager=None, selected_server_uuid=None):
         """Resolve the foreign-library config into rail-appendable sections.
 
-        Live sections get their server suffix applied to the display title, matching
-        the placeholder's suffixed title. Records for the currently selected server
-        are skipped (they're already on the rail as normal libraries). Every returned
-        section is marked is_foreign so the render loop can tag it for the UI.
+        Serves from the per-sectionId resolution cache; un-cached records (not yet
+        resolved this session) render as offline placeholders so the GUI thread never
+        blocks on a foreign server's network call. Resolution happens off-thread via
+        ResolveForeignTask and upgrades placeholders to live in place.
         """
         if selected_server_uuid is None:
             sel = plexapp.SERVERMANAGER.selectedServer
             selected_server_uuid = sel.uuid if sel else None
+
+        def record_key(record):
+            return u'{0}:{1}'.format(record.get('server_uuid'), record.get('section_key'))
+
         sections = []
         for record in self.foreignLibraries():
             if record.get('server_uuid') == selected_server_uuid:
                 continue
-            section, offline = self.resolveForeignLibrary(record, manager=manager)
+            cache = getattr(self, '_foreignResolved', None) or {}
+            resolved = cache.get(record_key(record))
+            if resolved is not None:
+                section, offline = resolved
+            else:
+                # not resolved this session: show placeholder now, resolve in background
+                section, offline = (
+                    ForeignLibrarySection.placeholder(**{
+                        'server_uuid': record.get('server_uuid'),
+                        'section_key': record.get('section_key'),
+                        'server_name': record.get('server_name'),
+                        'section_title': record.get('section_title'),
+                    }), True)
             section.is_foreign = True
             if not offline:
                 section.title = u'{0} - {1}'.format(
@@ -1166,6 +1221,31 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             r.get('server_uuid') == section.server.uuid
             and r.get('section_key') == str(section.key)
             for r in self.foreignLibraries())
+
+    def _orderRailSections(self, sections, foreign_sections, order):
+        """Order locals plus foreign into the rail render order.
+
+        Locals and pins follow the saved `order`. A foreign library that was moved keeps
+        the slot its sectionId holds in `order`; one never moved (absent from `order`)
+        goes to the end of the rail. Before this, foreign libraries were always appended
+        last, so a moved one snapped back to the end after a restart.
+        """
+
+        def orderPos(s):
+            ck = self.cacheKeyForSection(s)
+            if ck in order:
+                return order.index(ck), 0
+            if isinstance(s, PinnedTypeSection):
+                lib_ck = self.cacheKeyForSection(s.librarySection)
+                if lib_ck in order:
+                    # pinned after the order was stored: follow its library instead of
+                    # ending up in front of everything
+                    return order.index(lib_ck), 1
+            if getattr(s, 'is_foreign', False):
+                return len(order), 0  # never-ordered foreign: end of rail
+            return -1, 0
+
+        return sorted(sections + foreign_sections, key=orderPos)
 
     @staticmethod
     def _sameRailSection(a, b):
@@ -1213,6 +1293,34 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self.tasks += tasks
         if tasks:
             backgroundthread.BGThreader.addTasks(tasks)
+
+    def _onForeignResolved(self):
+        """Called from ResolveForeignTask on a worker thread: upgrade placeholders and
+        refresh the rail once."""
+        with self.lock:
+            self._foreignResolveScheduled = False
+            if not any(not offline for _, offline in
+                       (getattr(self, '_foreignResolved', {}) or {}).values()):
+                return  # nothing went live; nothing to refresh
+            for server_uuid in {r.get('server_uuid') for r in self.foreignLibraries()}:
+                self._reResolveForeignPlaceholders(server_uuid)
+            self.serverRefresh()
+
+    def _kickForeignResolution(self):
+        """Start background resolution for foreign records not yet resolved this session."""
+        if getattr(self, '_foreignResolved', None) is None:
+            self._foreignResolved = {}
+        if getattr(self, '_foreignResolveScheduled', False):
+            return  # one in-flight resolve round is enough
+        pending = [r for r in self.foreignLibraries()
+                   if u'{0}:{1}'.format(r.get('server_uuid'), r.get('section_key'))
+                   not in self._foreignResolved]
+        if not pending:
+            return
+        self._foreignResolveScheduled = True
+        task = ResolveForeignTask().setup(self, pending)
+        self.tasks.append(task)
+        backgroundthread.BGThreader.addTask(task)
 
     # --- SectionId settings migration (backward compat) -----------------------
     # Before sectionId, this addon (a released 1.13.x/1.14.x) persisted settings
@@ -4231,23 +4339,22 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 pinned.append(PinnedTypeSection(section, item_type))
         sections = pinned
 
-        # sort libraries
+        # foreign libraries resolved once (network); merged into the rail render order
+        # below so a moved foreign library keeps its saved position across restart.
+        # They stay out of the cross-section hub pipeline, which only handles locals.
+        foreign_sections = self.foreignRailSections()
+        self._kickForeignResolution()
+        for fs in foreign_sections:
+            self.allSections[self.cacheKeyForSection(fs)] = fs
+
+        hub_sections = list(sections)
+
+        # sort libraries (locals + foreign merge for render order)
         if "order" in self.librarySettings:
-            order = self.librarySettings["order"]
-
-            def orderPos(s):
-                ck = self.cacheKeyForSection(s)
-                if ck in order:
-                    return order.index(ck), 0
-                if isinstance(s, PinnedTypeSection):
-                    lib_ck = self.cacheKeyForSection(s.librarySection)
-                    if lib_ck in order:
-                        # pinned after the order was stored: follow its library instead of
-                        # ending up in front of everything
-                        return order.index(lib_ck), 1
-                return -1, 0
-
-            sections = sorted(sections, key=orderPos)
+            sections = self._orderRailSections(
+                sections, foreign_sections, self.librarySettings["order"])
+        else:
+            sections = sections + foreign_sections
 
         # speedup if we don't have any hidden libraries
         if not self.anyLibraryHidden:
@@ -4256,7 +4363,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if plexapp.SERVERMANAGER.selectedServer.hasHubs():
             # Include hidden sections that are needed for cross-section hubs.
             # Pinned item-type views share their library's hubs, so they're never fetched.
-            fetch_sections = [s for s in sections if not isinstance(s, PinnedTypeSection)]
+            fetch_sections = [s for s in hub_sections if not isinstance(s, PinnedTypeSection)]
             required_sources = self.getRequiredSourceSections(None)  # Home's required sources
             for source_key in required_sources:
                 if source_key and source_key in self.allSections:
@@ -4269,19 +4376,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             # are not hub sources for anything, so they're counted nowhere and fetched apart.
             self._pendingLibrarySections = len([s for s in fetch_sections if not s.server.DEFER_HUBS])
             self.tasks += [PinnedTypeHubsTask().setup(s, self.sectionHubsCallback)
-                           for s in sections if isinstance(s, PinnedTypeSection)
+                           for s in hub_sections if isinstance(s, PinnedTypeSection)
                            and not s.server.DEFER_HUBS]
             backgroundthread.BGThreader.addTasks(self.tasks)
 
-        # foreign libraries: appended after local sorting, so they end up at the end of
-        # the rail; live foreign sections now have their hubs fetched via
-        # scheduleForeignHubFetches; offline placeholders are skipped there.
-        foreign_sections = self.foreignRailSections()
-        # Populate allSections with foreign sections keyed by their cacheKeyForSection
-        for fs in foreign_sections:
-            fck = self.cacheKeyForSection(fs)
-            self.allSections[fck] = fs
-        sections = sections + foreign_sections
         self.scheduleForeignHubFetches(foreign_sections)
 
         show_pm_indicator = util.getSetting('path_mapping_indicators')
@@ -5015,21 +5113,36 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self.onNewServer()
 
     def _reResolveForeignPlaceholders(self, server_uuid):
+        """Upgrade placeholders for `server_uuid` to their live section.
+
+        Uses the resolution cache when available (no network); falls back to a network
+        resolve for records not resolved this session (e.g. a server that became
+        reachable after startup). Returns True if any placeholder went live.
+        """
         upgraded = False
-        for key, record in list(self.allSections.items()):
+        cache = getattr(self, '_foreignResolved', None)
+        if cache is None:
+            cache = {}
+        for key, record in list(getattr(self, 'allSections', {}).items()):
             if not isinstance(record, ForeignLibrarySection):
                 continue
             if record.server_uuid != server_uuid:
                 continue
-            resolved, offline = self.resolveForeignLibrary({
-                'server_uuid': record.server_uuid,
-                'section_key': record.section_key,
-                'server_name': record.server_name,
-                'section_title': record.section_title,
-            })
-            if not offline:
-                self.allSections[key] = resolved
+            cached = cache.get(record.sectionId)
+            if cached is not None and not cached[1]:
+                self.allSections[key] = cached[0]  # reuse cached live, no network
                 upgraded = True
+            else:
+                resolved, offline = self.resolveForeignLibrary({
+                    'server_uuid': record.server_uuid,
+                    'section_key': record.section_key,
+                    'server_name': record.server_name,
+                    'section_title': record.section_title,
+                })
+                if not offline:
+                    cache[record.sectionId] = (resolved, False)  # keep cache in sync
+                    self.allSections[key] = resolved
+                    upgraded = True
         return upgraded
 
     def onReachableServer(self, server=None, **kwargs):

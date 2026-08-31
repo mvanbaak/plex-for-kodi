@@ -47,6 +47,7 @@ class FakeSection(object):
     def __init__(self, key="3", title="Movies", server_uuid="SERVERUUID"):
         self.key = key
         self.title = title
+        self.server_uuid = server_uuid
         self.server = FakeServer(server_uuid)
 
     def all(self, *args, **kwargs):
@@ -264,6 +265,141 @@ class PinnedSectionOrderTest(KodiTestCase):
                          self.orderedKeys(["3", "5"], [movies, shows]))
         self.assertEqual(["5", "3", "3#collection"],
                          self.orderedKeys(["5", "3"], [movies, shows]))
+
+
+class ForeignRailOrderTest(KodiTestCase):
+    """A moved foreign library keeps its saved slot; an untouched one stays at the end."""
+
+    def setUp(self):
+        self.win = homeWindow({})
+        self.movies = FakeSection(key="1")
+        self.shows = FakeSection(key="5", server_uuid="SERVERUUID", title="TV")
+        self.foreign = FakeSection(key="2", server_uuid="AWAY")
+        self.foreign.is_foreign = True
+
+    def keys(self, sections):
+        return [s.key for s in sections]
+
+    def test_moved_foreign_keeps_its_saved_position(self):
+        # saved order records the foreign library mid-rail (user moved it there)
+        got = self.win._orderRailSections(
+            [self.movies, self.shows], [self.foreign],
+            ["SERVERUUID:1", "AWAY:2", "SERVERUUID:5"])
+        self.assertEqual(["1", "2", "5"], self.keys(got))
+
+    def test_never_ordered_foreign_goes_to_the_end(self):
+        got = self.win._orderRailSections(
+            [self.movies, self.shows], [self.foreign],
+            ["SERVERUUID:1", "SERVERUUID:5"])
+        self.assertEqual(["1", "5", "2"], self.keys(got))
+
+
+class ForeignResolveCacheTest(KodiTestCase):
+    def setUp(self):
+        self.win = homeWindow({})
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "2",
+             "server_name": "Away", "section_title": "Series"},
+        ]
+        self.win._foreignResolved = {}
+        self.win.tasks = []
+
+    def test_uncached_foreign_renders_a_placeholder_without_network(self):
+        # no cache entry yet -> placeholder (offline), no server, no blocking resolve
+        sections = self.win.foreignRailSections(manager=FakeServer("AWAY"),
+                                                selected_server_uuid="SERVERUUID")
+        self.assertEqual(1, len(sections))
+        self.assertTrue(getattr(sections[0], 'offline', False))
+        self.assertIsNone(sections[0].server)
+
+    def test_cached_live_foreign_is_served_from_cache(self):
+        live = FakeSection(key="2", server_uuid="AWAY")
+        live.is_foreign = True
+        self.win._foreignResolved["AWAY:2"] = (live, False)
+        sections = self.win.foreignRailSections(manager=FakeServer("AWAY"),
+                                                selected_server_uuid="SERVERUUID")
+        self.assertIs(sections[0], live)
+
+
+class ForeignResolveTaskTest(KodiTestCase):
+    def setUp(self):
+        ENV.abort_requested = False  # task cancel guard consults the monitor
+        self.win = homeWindow({})
+        self.win._foreignResolved = {}
+        self.win.allSections = {}
+        self.win.tasks = []
+
+    def test_resolution_fills_cache_with_live_section_and_flags_upgrade(self):
+        record = {"server_uuid": "AWAY", "section_key": "2",
+                  "server_name": "Away", "section_title": "Series"}
+        live = FakeSection(key="2", server_uuid="AWAY")
+        class FakeLib(object):
+            def sections(self):
+                return [live]
+        server = FakeServer()
+        server.uuid = "AWAY"
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        task = home.ResolveForeignTask().setup(self.win, [record], manager=manager)
+        upgraded = task._resolve_records()
+        self.assertTrue(upgraded)
+        self.assertIs(self.win._foreignResolved["AWAY:2"][0], live)
+
+    def test_offline_record_is_not_cached_and_not_flagged_upgrade(self):
+        record = {"server_uuid": "AWAY", "section_key": "2",
+                  "server_name": "Away", "section_title": "Series"}
+        manager = FakeManager([])  # server unknown -> placeholder, offline
+        task = home.ResolveForeignTask().setup(self.win, [record], manager=manager)
+        upgraded = task._resolve_records()
+        self.assertFalse(upgraded)
+        # offline is a transient false-negative (server may not be connected yet) and
+        # must not be cached terminally, else the placeholder never re-resolves
+        self.assertNotIn("AWAY:2", self.win._foreignResolved)
+
+
+class ForeignReResolveCacheTest(KodiTestCase):
+    def test_re_resolve_uses_cached_live_result(self):
+        win = homeWindow({})
+        live = FakeSection(key="2", server_uuid="AWAY")
+        win._foreignResolved = {"AWAY:2": (live, False)}
+        win.allSections = {"AWAY:2": home.ForeignLibrarySection.placeholder(
+            server_uuid="AWAY", section_key="2", server_name="Away",
+            section_title="Series")}
+        upgraded = win._reResolveForeignPlaceholders("AWAY")
+        self.assertTrue(upgraded)
+        self.assertIs(win.allSections["AWAY:2"], live)
+
+    def test_re_resolve_falls_back_to_network_for_uncached(self):
+        win = homeWindow({})
+        win._foreignResolved = {}
+        live = FakeSection(key="2", server_uuid="AWAY")
+        server = FakeServer()
+        server.uuid = "AWAY"
+        class FakeLib(object):
+            def sections(self):
+                return [live]
+        server.library = FakeLib()
+        class RealLibServer(object):
+            def __init__(self, uuid, library):
+                self.uuid = uuid
+                self.library = library
+        real = RealLibServer("AWAY", server.library)
+        manager = FakeManager([real])
+        win.allSections = {"AWAY:2": home.ForeignLibrarySection.placeholder(
+            server_uuid="AWAY", section_key="2", server_name="Away",
+            section_title="Series")}
+        import lib.windows.home as home_mod
+        old = home_mod.plexapp.SERVERMANAGER
+        home_mod.plexapp.SERVERMANAGER = manager
+        try:
+            upgraded = win._reResolveForeignPlaceholders("AWAY")
+        finally:
+            home_mod.plexapp.SERVERMANAGER = old
+        self.assertTrue(upgraded)
+        self.assertIs(win.allSections["AWAY:2"], live)
+        # live result must also land in the cache, else foreignRailSections (which
+        # reads the cache, not allSections) keeps serving the placeholder forever
+        self.assertIs(win._foreignResolved["AWAY:2"][0], live)
 
 
 class LibrarySettingsPerItemTypeTest(KodiTestCase):
@@ -562,14 +698,8 @@ class ForeignRailSectionsTest(KodiTestCase):
 
     def test_reachable_server_yields_a_live_section_with_suffixed_title(self):
         live = FakeResolvableSection()
-        class FakeLib(object):
-            def sections(self):
-                return [live]
-        server = FakeServer()
-        server.uuid = "AWAY"  # match the record's foreign server
-        server.library = FakeLib()
-        manager = FakeManager([server])
-        sections = self.win.foreignRailSections(manager=manager,
+        self.win._foreignResolved = {"AWAY:1": (live, False)}
+        sections = self.win.foreignRailSections(manager=FakeManager([]),
                                                 selected_server_uuid="LOCAL")
         self.assertEqual(1, len(sections))
         self.assertFalse(sections[0].offline)
