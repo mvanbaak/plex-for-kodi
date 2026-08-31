@@ -84,6 +84,26 @@ def cwHubFrom(hubs, is_home=True):
     return None
 
 
+def mergeCwItems(home_cw, foreign_items):
+    """Append foreign CW items to the home CW hub, deduping by (server.uuid, ratingKey)."""
+    if not foreign_items or home_cw is None:
+        return 0
+    existing = set()
+    for it in list(home_cw.items):
+        server = getattr(it, 'server', None)
+        existing.add((getattr(server, 'uuid', None), getattr(it, 'ratingKey', None)))
+    added = 0
+    for it in foreign_items:
+        server = getattr(it, 'server', None)
+        key = (getattr(server, 'uuid', None), getattr(it, 'ratingKey', None))
+        if key in existing:
+            continue
+        existing.add(key)
+        home_cw.items.append(it)
+        added += 1
+    return added
+
+
 class SectionHubsTask(backgroundthread.Task):
     def setup(self, section, callback, section_keys=None, reselect_pos_dict=None):
         self.section = section
@@ -157,6 +177,34 @@ class ResolveForeignTask(backgroundthread.Task):
             self.win._foreignResolved[key] = (section, offline)
             upgraded = True
         return upgraded
+
+
+class ForeignContinueWatchingTask(backgroundthread.Task):
+    """Fetch a foreign server's Continue Watching hub off the GUI thread.
+
+    Reports a (hub, ok) tuple via the callback: ok=False when the server is slow or
+    unreachable (transient; the caller retries); ok=True with hub=None when the server
+    simply has no Continue Watching hub (not transient -- not retried).
+    """
+
+    def setup(self, win, server, callback):
+        self.win = win
+        self.server = server
+        self.callback = callback
+        return self
+
+    def run(self):
+        if self.isCanceled() or not self.server:
+            return
+        try:
+            hubs = self.server.hubs(None, count=HUB_PAGE_SIZE)
+        except Exception:
+            util.DEBUG_LOG('Foreign CW fetch failed for {0}', getattr(self.server, 'name', None))
+            self.callback(self.server, None, False)
+            return
+        if self.isCanceled():
+            return
+        self.callback(self.server, cwHubFrom(hubs), True)
 
 
 class PinnedTypeHubsTask(backgroundthread.Task):
@@ -1349,6 +1397,43 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         task = ResolveForeignTask().setup(self, pending)
         self.tasks.append(task)
         backgroundthread.BGThreader.addTask(task)
+
+    def _scheduleForeignCwFetches(self):
+        """Dispatch one parallel CW fetch task per live pinned foreign server."""
+        if not util.getSetting('hubs_use_new_continue_watching', False):
+            return  # the local hub isn't using the new CW mode either
+        live, pending = self._foreignCwServers()
+        with self.lock:
+            pending_set = getattr(self, '_cwRetryPending', None)
+            if pending_set is None:
+                pending_set = self._cwRetryPending = set()
+            for uuid in pending:
+                pending_set.add(uuid)
+            tasks = [ForeignContinueWatchingTask().setup(self, server, self._onForeignCw)
+                     for server in live if server.uuid not in pending_set]
+        if tasks:
+            self.tasks += tasks
+            backgroundthread.BGThreader.addTasks(tasks)
+
+    def _onForeignCw(self, server, hub, ok):
+        """Merge a foreign CW hub's items into the Home CW hub and re-draw the row."""
+        with self.lock:
+            pending_set = getattr(self, '_cwRetryPending', None)
+            if pending_set is None:
+                pending_set = self._cwRetryPending = set()
+            if not ok:
+                if server is not None:
+                    pending_set.add(server.uuid)
+                return
+            if server is not None:
+                pending_set.discard(server.uuid)
+            hubs = self.sectionHubs.get(None)
+            home_cw = cwHubFrom(hubs)
+            if home_cw is None or hub is None:
+                return
+            if mergeCwItems(home_cw, getattr(hub, 'items', ())):
+                if getattr(self, 'hubControls', None) is not None:
+                    self.updateHubCallback(home_cw, items=home_cw.items)
 
     # --- SectionId settings migration (backward compat) -----------------------
     # Before sectionId, this addon (a released 1.13.x/1.14.x) persisted settings

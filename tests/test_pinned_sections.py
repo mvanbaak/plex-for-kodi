@@ -16,6 +16,7 @@ thread exit immediately, otherwise the interpreter never shuts down.
 from __future__ import absolute_import
 
 import json
+import threading
 
 from kodienv import ENV
 
@@ -839,6 +840,13 @@ def hub(identifier, **kw):
     return _Hub(identifier, **kw)
 
 
+def cwItem(rk, server_uuid, server_name=None):
+    it = _Hub('rk')
+    it.ratingKey = rk
+    it.server = FakeServer(server_uuid)
+    return it
+
+
 class SectionHubsCollisionTest(KodiTestCase):
     def test_cache_key_collision_safe_across_servers(self):
         win = homeWindow({})
@@ -1217,4 +1225,99 @@ class CwHubHelperTest(KodiTestCase):
         absent = [H('movie.newlyreleased'), H('movie.recentlyviewed.1')]
         self.assertIsNone(cwHubFrom(absent))
         self.assertIsNone(cwHubFrom([]))
+
+
+class ForeignCwMergeTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignCwMergeTest, self).setUp()
+        self.win = homeWindow({})
+        self.win._cwRetryPending = set()
+
+    def _hub(self, identifier, *item_ids, **kw):
+        hub = _Hub(identifier, **kw)
+        hub.items = list(item_ids)
+        return hub
+
+    def test_cwHubFrom_finds_merged_cw_hub_in_home_hubs(self):
+        from lib.windows.home import cwHubFrom
+        local_cw = _Hub('continueWatching')
+        hubs = [_Hub('movie.newlyreleased'), _Hub('tv.ondeck'), local_cw]
+        self.assertIs(cwHubFrom(hubs), local_cw)
+
+    def test_merge_appends_foreign_cw_items(self):
+        from lib.windows.home import mergeCwItems
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL")]
+        foreign = [cwItem(2, "AWAY"), cwItem(3, "AWAY")]
+        added = mergeCwItems(local, foreign)
+        self.assertEqual(2, added)
+        self.assertEqual([1, 2, 3], [i.ratingKey for i in local.items])
+
+    def test_merge_dedupes_by_server_and_rating_key(self):
+        from lib.windows.home import mergeCwItems
+        local = _Hub('continueWatching')
+        local.items = [cwItem(11, "LOCAL"), cwItem(12, "AWAY")]
+        foreign = [cwItem(12, "AWAY"), cwItem(13, "AWAY")]
+        added = mergeCwItems(local, foreign)
+        self.assertEqual(1, added)
+        self.assertEqual({11, 12, 13}, {i.ratingKey for i in local.items})
+
+    def test_merge_handles_empty_and_none(self):
+        from lib.windows.home import mergeCwItems
+        local = _Hub('continueWatching')
+        local.items = []
+        self.assertEqual(0, mergeCwItems(local, None))
+        self.assertEqual(0, mergeCwItems(None, [cwItem(1, "X")]))
+
+
+class ForeignCwHandlersTest(KodiTestCase):
+    def setUp(self):
+        super(ForeignCwHandlersTest, self).setUp()
+        from lib.windows import home as home_mod
+        self.home_mod = home_mod
+        self.win = homeWindow({})
+        self.win.tasks = []
+        self.win._cwRetryPending = set()
+        self.win._foreignLibraries = []
+        self.win.lock = threading.RLock()
+        # isolate from the real selected server + hub drawing
+        self.win.hubControls = None
+        self.win.sectionList = []
+        # patch lib.util.getSetting for the pref gate
+        import lib.util as util
+        self._orig_getSetting = util.getSetting
+        self._values = {}
+        def fake_valid_get_setting(name, default=None):
+            return self._values.get(name, self._orig_getSetting(name, default))
+        util.getSetting = fake_valid_get_setting
+        self.addCleanup(self._restore_getSetting)
+
+    def _restore_getSetting(self):
+        import lib.util as util
+        util.getSetting = self._orig_getSetting
+
+    def test_onForeignCw_merges_items_and_clears_retry(self):
+        from lib.windows.home import cwHubFrom
+        local = _Hub('continueWatching')
+        local.items = [cwItem(1, "LOCAL")]
+        self.win.sectionHubs[None] = [local]
+        f = _Hub('home.continue')
+        f.items = [cwItem(2, "AWAY")]
+        self.win._cwRetryPending = {"AWAY"}
+        self.win._onForeignCw(FakeServer("AWAY"), f, True)
+        self.assertNotIn("AWAY", self.win._cwRetryPending)
+        self.assertEqual({1, 2}, {i.ratingKey for i in cwHubFrom(self.win.sectionHubs[None]).items})
+
+    def test_onForeignCw_timeout_adds_to_retry(self):
+        self.win.sectionHubs[None] = []
+        self.win._cwRetryPending = set()
+        self.win._onForeignCw(FakeServer("AWAY"), None, False)
+        self.assertIn("AWAY", self.win._cwRetryPending)
+
+    def test_schedule_pref_off_dispatches_nothing(self):
+        self._values["hubs_use_new_continue_watching"] = False
+        self.win._foreignCwServers = lambda *a, **k: ([FakeServer("AWAY")], [])
+        before = len(self.win.tasks)
+        self.win._scheduleForeignCwFetches()
+        self.assertEqual(before, len(self.win.tasks))
 
