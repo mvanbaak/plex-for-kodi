@@ -1141,12 +1141,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         ]
         if len(self._foreignLibraries) != before:
             self.saveForeignLibraries()
-
-    def pruneForeignLibraries(self, known_servers):
-        libs = self.foreignLibraries()
-        self._foreignLibraries = [r for r in libs if r.get('server_uuid') in known_servers]
-        self.saveForeignLibraries()
-        return self._foreignLibraries
+            if server_uuid is not None and section_key is not None:
+                # drop the unpinned library's saved rail slot so re-pinning starts
+                # from the end instead of resurrecting its old position
+                sid = u'{0}:{1}'.format(server_uuid, str(section_key))
+                order = self.librarySettings.get('order')
+                if order and sid in order:
+                    self.librarySettings['order'].remove(sid)
+                    self.saveLibrarySettings()
 
     def resolveForeignLibrary(self, record, manager=None):
         """Resolve a foreign config record to a live section or an offline placeholder.
@@ -1211,8 +1213,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     }), True)
             section.is_foreign = True
             if not offline:
+                # format from the raw stored title every pass; the cached section's
+                # title stays raw so re-resolving never appends '- server' twice
                 section.title = u'{0} - {1}'.format(
-                    section.title, record.get('server_name'))
+                    record.get('section_title') or section.title,
+                    record.get('server_name'))
             sections.append(section)
         return sections
 
@@ -3567,14 +3572,15 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
         else:
             options = []
+            is_foreign = getattr(section, 'is_foreign', False)
 
-            if plexapp.ACCOUNT.isAdmin and section not in (watchlist_section, playlists_section):
+            if not is_foreign and plexapp.ACCOUNT.isAdmin and section not in (watchlist_section, playlists_section):
                 options = [{'key': 'refresh', 'display': T(33082, "Scan Library Files")},
                            {'key': 'emptyTrash', 'display': T(33083, "Empty Trash")},
                            {'key': 'analyze', 'display': T(33084, "Analyze")},
                            dropdown.SEPARATOR]
 
-            if section.locations and util.getSetting('path_mapping'):
+            if not is_foreign and section.locations and util.getSetting('path_mapping'):
                 for loc in section.locations:
                     source, target = section.getMappedPath(loc)
                     loc_is_mapped = source and target
@@ -3587,12 +3593,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
                 options.append(dropdown.SEPARATOR)
 
-            if 'collection' in PINNABLE_TYPES.get(str(getattr(section, 'TYPE', None)), ()) \
+            if not is_foreign and 'collection' in PINNABLE_TYPES.get(str(getattr(section, 'TYPE', None)), ()) \
                     and 'collection' not in self.sectionPinnedTypes(section):
                 options.append({'key': 'pin_collections',
                                 'display': T(35044, "Pin collections to the top bar")})
 
-            options.append({'key': 'hide', 'display': T(33028, "Hide library")})
+            if not is_foreign:
+                options.append({'key': 'hide', 'display': T(33028, "Hide library")})
             options.append({'key': 'move', 'display': T(33039, "Move")})
 
             if section not in (watchlist_section, playlists_section):
@@ -3601,14 +3608,17 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 else:
                     options.append({'key': 'pin_to_home', 'display': T(35070, "Pin to home")})
 
-            options.append(dropdown.SEPARATOR)
-
-            if 'libraries' in util.getSetting('cache_requests') and section != watchlist_section:
-                options.append({'key': 'section_cache_reset', 'display': T(33721, "Clear library cache (not items)")})
+            show_cache = 'libraries' in util.getSetting('cache_requests') and section != watchlist_section
+            if not is_foreign or show_cache:
                 options.append(dropdown.SEPARATOR)
 
-            # Add Manage Hubs and Refresh Hubs options (not applicable to watchlist)
-            if section != watchlist_section:
+            if show_cache:
+                options.append({'key': 'section_cache_reset', 'display': T(33721, "Clear library cache (not items)")})
+                if not is_foreign:
+                    options.append(dropdown.SEPARATOR)
+
+            # Add Manage Hubs and Refresh Hubs options (not applicable to foreign or watchlist)
+            if not is_foreign and section != watchlist_section:
                 options.append(dropdown.SEPARATOR)
                 options.append({'key': 'manage_hubs', 'display': T(34080, "Manage Hubs")})
                 options.append({'key': 'refresh_hubs', 'display': T(34096, "Refresh Hubs")})

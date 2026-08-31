@@ -294,6 +294,47 @@ class ForeignRailOrderTest(KodiTestCase):
         self.assertEqual(["1", "5", "2"], self.keys(got))
 
 
+class ForeignUnpinOrderTest(KodiTestCase):
+    """Unpinning a foreign library clears its saved rail slot, so re-pinning starts
+    at the end instead of resurrecting its old position."""
+
+    def setUp(self):
+        self.win = homeWindow({})
+        # this test exercises the in-memory order-slot mutation, not Kodi settings
+        # persistence (which needs account/server context the bare window lacks)
+        self.win.saveForeignLibraries = lambda: None
+        self.win.saveLibrarySettings = lambda: None
+
+    def test_unpin_drops_the_saved_order_slot(self):
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "2",
+             "server_name": "Away", "section_title": "Series"},
+        ]
+        self.win.librarySettings = {"order": ["SERVERUUID:1", "AWAY:2", "SERVERUUID:5"]}
+        self.win.unpinForeignLibrary(server_uuid="AWAY", section_key="2")
+        self.assertEqual([], self.win._foreignLibraries)
+        self.assertNotIn("AWAY:2", self.win.librarySettings["order"])
+
+    def test_unpin_leaves_other_saved_slots_untouched(self):
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "2",
+             "server_name": "Away", "section_title": "Series"},
+        ]
+        self.win.librarySettings = {"order": ["SERVERUUID:1", "AWAY:2", "SERVERUUID:5"]}
+        self.win.unpinForeignLibrary(server_uuid="AWAY", section_key="2")
+        self.assertEqual(["SERVERUUID:1", "SERVERUUID:5"],
+                         self.win.librarySettings["order"])
+
+    def test_unpin_without_order_does_not_crash(self):
+        self.win._foreignLibraries = [
+            {"server_uuid": "AWAY", "section_key": "2",
+             "server_name": "Away", "section_title": "Series"},
+        ]
+        self.win.librarySettings = {}
+        self.win.unpinForeignLibrary(server_uuid="AWAY", section_key="2")
+        self.assertEqual([], self.win._foreignLibraries)
+
+
 class ForeignResolveCacheTest(KodiTestCase):
     def setUp(self):
         self.win = homeWindow({})
@@ -319,6 +360,17 @@ class ForeignResolveCacheTest(KodiTestCase):
         sections = self.win.foreignRailSections(manager=FakeServer("AWAY"),
                                                 selected_server_uuid="SERVERUUID")
         self.assertIs(sections[0], live)
+
+    def test_live_foreign_title_does_not_accumulate_server_name(self):
+        # the cached section is reused across passes; formatting must be idempotent
+        # (raw title + '- server' every time, never '- server - server - ...')
+        live = FakeSection(key="2", server_uuid="AWAY")
+        live.is_foreign = True
+        self.win._foreignResolved["AWAY:2"] = (live, False)
+        for _ in range(3):
+            sections = self.win.foreignRailSections(manager=FakeServer("AWAY"),
+                                                    selected_server_uuid="SERVERUUID")
+            self.assertEqual("Series - Away", sections[0].title)
 
 
 class ForeignResolveTaskTest(KodiTestCase):
@@ -553,13 +605,6 @@ class ForeignLibraryConfigTest(KodiTestCase):
         self.win.unpinForeignLibrary(server_uuid="NOPE", section_key="1")
         self.assertEqual(1, len(self.win.foreignLibraries()))
 
-    def test_prune_drops_records_for_unknown_servers(self):
-        self.pin(server_uuid="AAA")
-        self.pin(server_uuid="BBB", name="Other")
-        pruned = self.win.pruneForeignLibraries(known_servers={"AAA"})
-        surviving = [r["server_uuid"] for r in pruned]
-        self.assertEqual(["AAA"], surviving)
-
     def test_unpin_with_only_one_filter_is_a_safe_noop(self):
         # AND semantics: both server and key must match to remove
         self.pin(server_uuid="AAA")
@@ -698,6 +743,7 @@ class ForeignRailSectionsTest(KodiTestCase):
 
     def test_reachable_server_yields_a_live_section_with_suffixed_title(self):
         live = FakeResolvableSection()
+        self.win._foreignLibraries[0]["section_title"] = "Live Movies"  # resolve syncs this
         self.win._foreignResolved = {"AWAY:1": (live, False)}
         sections = self.win.foreignRailSections(manager=FakeManager([]),
                                                 selected_server_uuid="LOCAL")
