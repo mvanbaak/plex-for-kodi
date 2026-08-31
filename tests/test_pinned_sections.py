@@ -18,6 +18,7 @@ from __future__ import absolute_import
 import json
 import threading
 
+import xbmc
 from kodienv import ENV
 
 ENV.abort_requested = True
@@ -1321,3 +1322,104 @@ class ForeignCwHandlersTest(KodiTestCase):
         self.win._scheduleForeignCwFetches()
         self.assertEqual(before, len(self.win.tasks))
 
+
+
+class ForeignCwWiringTest(KodiTestCase):
+    """Wiring tests for the Foreign CW fan-out: reachability flush, periodic flush, and
+    the new helper call sites. `_flushCwRetry` (periodic tick) + `_retryForeignCw`
+    (reachable:server) clear the retry set so a formerly-pending server re-dispatches.
+    """
+
+    def setUp(self):
+        super(ForeignCwWiringTest, self).setUp()
+        from lib.windows import home as home_mod
+        from lib.windows import kodigui as kodigui_mod
+        self.home_mod = home_mod
+        self.kodigui_mod = kodigui_mod
+        self.win = homeWindow({})
+        self.win.lock = threading.RLock()
+        self.win.tasks = []
+        self.win._cwRetryPending = {"AWAY"}
+        self.win.hubControls = None
+        self.win._foreignCwServers = lambda: (
+            [FakeServer("AWAY"), FakeServer("A"), FakeServer("B")], ["B"])
+        self.calls = []
+        self.win._onForeignCw = lambda *a, **k: self.calls.append(a)  # stub real callback
+        # pref ON so scheduling actually dispatches
+        import lib.util as util
+        self._orig_getSetting = util.getSetting
+        def fake_get_setting(name, default=None):
+            if name == 'hubs_use_new_continue_watching':
+                return True
+            return self._orig_getSetting(name, default)
+        util.getSetting = fake_get_setting
+        self.addCleanup(self._restore_getSetting)
+        # scheduling dispatches to the real threader; no-op it like other tests do
+        self._orig_add = home_mod.backgroundthread.BGThreader.addTasks
+        home_mod.backgroundthread.BGThreader.addTasks = lambda tasks: None
+        self.addCleanup(self._restore_addTasks)
+
+    def _restore_getSetting(self):
+        import lib.util as util
+        util.getSetting = self._orig_getSetting
+
+    def _restore_addTasks(self):
+        self.home_mod.backgroundthread.BGThreader.addTasks = self._orig_add
+
+    def test_flush_clears_reachable_and_reschedules(self):
+        # AWAY starts pending; after flush it is reachable (live) so it is cleared and
+        # re-dispatched. B stays put because _foreignCwServers still reports it pending.
+        self.win._flushCwRetry()
+        task_uuids = {t.server.uuid for t in self.win.tasks}
+        self.assertNotIn("AWAY", self.win._cwRetryPending)
+        self.assertIn("AWAY", task_uuids)
+        self.assertIn("A", task_uuids)
+        self.assertIn("B", self.win._cwRetryPending)
+
+    def test_retry_foreign_cw_clears_one_server_and_reschedules(self):
+        # reachable:server path: only the one server is cleared and re-dispatched; the
+        # still-unreachable one stays pending.
+        self.win._cwRetryPending = {"AWAY", "B"}
+        self.win._foreignCwServers = lambda: ([FakeServer("AWAY"), FakeServer("A")], ["B"])
+        self.win._retryForeignCw("AWAY")
+        self.assertNotIn("AWAY", self.win._cwRetryPending)
+        task_uuids = {t.server.uuid for t in self.win.tasks}
+        self.assertIn("AWAY", task_uuids)
+        self.assertIn("B", self.win._cwRetryPending)
+
+    def test_onReachableServer_dispatches_retry_for_pending_cw(self):
+        # call-site wiring: a server in the retry set triggers _retryForeignCw
+        self.win._cwRetryPending = {"AWAY"}
+        self.win._reResolveForeignPlaceholders = lambda uuid: False
+        self.win.onNewServer = lambda **kw: None
+        self.win.serverList = []
+        retried = []
+        self.win._retryForeignCw = lambda uuid: retried.append(uuid)
+        self.win.onReachableServer(server=FakeServer("AWAY"))
+        self.assertEqual(["AWAY"], retried)
+
+    def test_tick_flushes_cw_retry_on_stale_hub(self):
+        # call-site wiring: tick() reaches the stale block and flushes the CW retry set.
+        # A stale hub (lastUpdated=0) with a pending server must trigger _flushCwRetry.
+        flushed = []
+        self.win._flushCwRetry = lambda: flushed.append(True)
+        self.win.showHubs = lambda *a, **k: None
+        self.win._shuttingDown = False
+        self.win.movingSection = False
+        # is_active() reads BaseFunctions.lastWinID == self._winID; make it evaluate True
+        self.win._winID = 13001
+        self.kodigui_mod.BaseFunctions.lastWinID = 13001
+        self.win.service_responder = lambda: False
+        self.win._updateSourceChanged = False
+        self.win.lastSection = home.home_section
+        self.win._ignoreTick = False
+        self.win._checkingForExit = False
+        self.win.cacheKeyForSection = lambda s: "HOME"
+        stale = _Hub("continueWatching", lastUpdated=0)
+        self.win.sectionHubs = {"HOME": stale}
+        self.win._pathMappingTargets = []
+        self.win._lastPathMappingProbe = 9e18
+        self.win._lastReachabilityCheck = 9e18
+        xbmc.Player.playing_video = False
+        self.win.tick()
+        self.assertEqual([True], flushed)

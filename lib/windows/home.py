@@ -1435,6 +1435,34 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 if getattr(self, 'hubControls', None) is not None:
                     self.updateHubCallback(home_cw, items=home_cw.items)
 
+    def _flushCwRetry(self):
+        """Retry foreign CW fetches that were transiently pending (slow/unreachable).
+
+        Runs on the periodic tick: any pending uuid that is now resolvable is cleared
+        so _scheduleForeignCwFetches re-dispatches it; still-unreachable uuids stay
+        pending for the next cadence.
+        """
+        with self.lock:
+            pending_set = getattr(self, '_cwRetryPending', None)
+            if not pending_set:
+                return
+            live, new_pending = self._foreignCwServers()
+            live_uuids = {s.uuid for s in live}
+            for uuid in list(pending_set):
+                if uuid in live_uuids:
+                    pending_set.discard(uuid)
+            for uuid in new_pending:
+                pending_set.add(uuid)
+        self._scheduleForeignCwFetches()
+
+    def _retryForeignCw(self, server_uuid):
+        """Drop one server from the CW retry set (it became reachable) and re-dispatch."""
+        with self.lock:
+            pending_set = getattr(self, '_cwRetryPending', None)
+            if pending_set is not None:
+                pending_set.discard(server_uuid)
+        self._scheduleForeignCwFetches()
+
     # --- SectionId settings migration (backward compat) -----------------------
     # Before sectionId, this addon (a released 1.13.x/1.14.x) persisted settings
     # against *bare* library wire keys ('1') and *colon* catalog_ids ('1:Movies').
@@ -2962,6 +2990,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 not playing):
             util.DEBUG_LOG("Home: Ticking, section stale, calling showHubs(update=True)")
             self.showHubs(self.lastSection, update=True)
+            self._flushCwRetry()
             util.cleanupCacheFolder()
 
         if (not playing and util.getSetting('periodic_reachability_check', False) and
@@ -4524,6 +4553,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             backgroundthread.BGThreader.addTasks(self.tasks)
 
         self.scheduleForeignHubFetches(foreign_sections)
+        self._scheduleForeignCwFetches()
 
         show_pm_indicator = util.getSetting('path_mapping_indicators')
         for section in sections:
@@ -5289,6 +5319,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         return upgraded
 
     def onReachableServer(self, server=None, **kwargs):
+        if (server is not None and util.getSetting('hubs_use_new_continue_watching', False)
+                and server.uuid in getattr(self, '_cwRetryPending', set())):
+            # a pending foreign CW server came back; clear it and re-dispatch its fetch
+            self._retryForeignCw(server.uuid)
         if server is not None and self._reResolveForeignPlaceholders(server.uuid):
             self.serverRefresh()
             return
