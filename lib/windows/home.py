@@ -1453,7 +1453,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         backgroundthread.BGThreader.addTask(task)
 
     def _scheduleForeignCwFetches(self):
-        """Dispatch one parallel CW fetch task per live pinned foreign server."""
+        """Dispatch one parallel CW fetch task per live pinned foreign server.
+
+        Also the periodic re-dispatch: a server that was pending (slow/unreachable)
+        but is now reachable is dropped from the retry set so it re-fetches, while
+        still-unreachable ones stay pending for the next cadence.
+        """
         if not util.getSetting('hubs_use_new_continue_watching', False):
             return  # the local hub isn't using the new CW mode either
         live, pending = self._foreignCwServers()
@@ -1461,6 +1466,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             pending_set = getattr(self, '_cwRetryPending', None)
             if pending_set is None:
                 pending_set = self._cwRetryPending = set()
+            live_uuids = {s.uuid for s in live}
+            for uuid in list(pending_set):
+                if uuid in live_uuids:
+                    pending_set.discard(uuid)
             for uuid in pending:
                 pending_set.add(uuid)
             tasks = [ForeignContinueWatchingTask().setup(self, server, self._onForeignCw)
@@ -1536,28 +1545,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     self._cwRedrawDeadline = 0
                     self._cwRedrawHub = None
                 if hub is not None and getattr(self, 'hubControls', None) is not None:
-                    self.updateHubCallback(hub, items=hub.items)
+                    # Full redraw (no items=): updateHubCallback's append mode would stack
+                    # the merged list on top of the already-drawn tiles, duplicating content.
+                    self.updateHubCallback(hub)
                 return
             util.MONITOR.waitFor(min(remaining, 0.2))
 
     def _flushCwRetry(self):
-        """Retry foreign CW fetches that were transiently pending (slow/unreachable).
-
-        Runs on the periodic tick: any pending uuid that is now resolvable is cleared
-        so _scheduleForeignCwFetches re-dispatches it; still-unreachable uuids stay
-        pending for the next cadence.
-        """
-        with self.lock:
-            pending_set = getattr(self, '_cwRetryPending', None)
-            if not pending_set:
-                return
-            live, new_pending = self._foreignCwServers()
-            live_uuids = {s.uuid for s in live}
-            for uuid in list(pending_set):
-                if uuid in live_uuids:
-                    pending_set.discard(uuid)
-            for uuid in new_pending:
-                pending_set.add(uuid)
+        """Periodic re-dispatch of foreign CW fetches (clears reachable pending servers)."""
         self._scheduleForeignCwFetches()
 
     def _retryForeignCw(self, server_uuid):
@@ -4434,6 +4429,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             util.DEBUG_LOG('Section changed ({0}): {1}', section.key, repr(section.title))
             self.lastSection = section
             self.showHubs(section)
+            if section.key is None:
+                # Returning to Home: refresh foreign CW so a just-watched foreign item
+                # appears without waiting for a full restart or the 5-min stale tick.
+                self._scheduleForeignCwFetches()
 
         # timing issue
         cur_sel_ds = self.sectionList.getSelectedItem().dataSource

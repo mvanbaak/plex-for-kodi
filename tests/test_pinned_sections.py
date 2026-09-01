@@ -1359,7 +1359,7 @@ class ForeignCwHandlersTest(KodiTestCase):
         self.win.hubControls = [object()]
         rendered = []
         self.win.updateHubCallback = (
-            lambda hub, items=None, reselect_pos=None: rendered.append(1))
+            lambda hub, items=None, reselect_pos=None: rendered.append(items))
         local = _Hub('continueWatching')
         local.items = [cwItem(1, "LOCAL")]
         self.win.sectionHubs[None] = [local]
@@ -1377,6 +1377,9 @@ class ForeignCwHandlersTest(KodiTestCase):
         t.join(timeout=2)
         # the whole burst coalesced into one trailing-edge redraw
         self.assertEqual(1, len(rendered))
+        # redraw must be a clean full replace (no items=), otherwise updateHubCallback's
+        # append mode stacks the merged list over already-drawn tiles and duplicates content
+        self.assertTrue(all(items is None for items in rendered))
         self.win.hubControls = None
 
     def test_apply_store_survives_home_refetch(self):
@@ -1413,6 +1416,32 @@ class ForeignCwHandlersTest(KodiTestCase):
         before = len(self.win.tasks)
         self.win._scheduleForeignCwFetches()
         self.assertEqual(before, len(self.win.tasks))
+
+    def test_returning_to_home_reschedules_foreign_cw(self):
+        class _SelList(object):
+            def __init__(self, selected):
+                self._sel = selected
+            def getSelectedItem(self):
+                return type('_MLI', (object,), {'dataSource': self._sel})()
+
+        home_section = _Hub('home', key=None, title='Home')
+        library_section = _Hub('lib', key='1', title='Movies')
+        self.win.lock = threading.RLock()
+        self.win.block_section_change = False
+        self.win.lastSection = None
+        self.win._closing = False
+        self.win.setProperty = lambda *a, **k: None
+        scheduled = []
+        self.win.showHubs = lambda *a, **k: None
+        self.win._scheduleForeignCwFetches = lambda: scheduled.append(1)
+        # returning to Library does not reschedule
+        self.win.sectionList = _SelList(library_section)
+        self.win._sectionReallyChanged(library_section)
+        self.assertEqual([], scheduled)
+        # returning to Home does
+        self.win.sectionList = _SelList(home_section)
+        self.win._sectionReallyChanged(home_section)
+        self.assertEqual([1], scheduled)
 
 
 
