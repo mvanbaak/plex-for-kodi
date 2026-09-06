@@ -189,8 +189,8 @@ class ResolveForeignTask(backgroundthread.Task):
     def run(self):
         if self.isCanceled() or not self.records:
             return
-        self._resolve_records()
-        self.win._onForeignResolved()
+        upgraded = self._resolve_records()
+        self.win._onForeignResolved(upgraded=upgraded)
 
     def _resolve_records(self):
         """Resolve un-cached records into the cache. Only LIVE results are cached: an
@@ -1290,6 +1290,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 'server_name': record.get('server_name'),
                 'section_title': record.get('section_title'),
             }), True
+        if not getattr(server, 'isReachable', lambda: True)():
+            # unreachable: resolve to a placeholder instead of querying a dead
+            # server.  The empty-url path in plexnet query() used to force a
+            # global resource refresh, kicking off a home-rebuild loop.
+            return ForeignLibrarySection.placeholder(**{
+                'server_uuid': record.get('server_uuid'),
+                'section_key': record.get('section_key'),
+                'server_name': record.get('server_name'),
+                'section_title': record.get('section_title'),
+            }), True
         try:
             for section in server.library.sections():
                 if str(section.key) == str(record.get('section_key')):
@@ -1424,14 +1434,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if tasks:
             backgroundthread.BGThreader.addTasks(tasks)
 
-    def _onForeignResolved(self):
+    def _onForeignResolved(self, upgraded=False):
         """Called from ResolveForeignTask on a worker thread: upgrade placeholders and
         refresh the rail once."""
         with self.lock:
             self._foreignResolveScheduled = False
-            if not any(not offline for _, offline in
-                       (getattr(self, '_foreignResolved', {}) or {}).values()):
-                return  # nothing went live; nothing to refresh
+            if not upgraded:
+                return  # nothing new went live; nothing to refresh
             for server_uuid in {r.get('server_uuid') for r in self.foreignLibraries()}:
                 self._reResolveForeignPlaceholders(server_uuid)
             self.serverRefresh()

@@ -268,10 +268,11 @@ class PlexServer(plexresource.PlexResource, signalsmixin.SignalsMixin):
 
         url = self.buildUrl(path, includeToken=True)
 
-        # If URL is empty, try refresh resources and return empty set for now
+        # ponytail: no active connection — return None.  Previous code called
+        # MANAGER.refreshResources(True) here, which amplified unreachable-server
+        # queries into a global resource-refresh storm (infinite home rebuilds).
         if not url:
-            util.WARN_LOG("Empty server url, returning None and refreshing resources")
-            util.MANAGER.refreshResources(True)
+            util.WARN_LOG("Empty server url, returning None")
             return None
 
         # add offset/limit

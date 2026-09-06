@@ -34,8 +34,12 @@ class FakeServer(object):
     uuid = "SERVERUUID"
     name = "Tower"
 
-    def __init__(self, uuid="SERVERUUID"):
+    def __init__(self, uuid="SERVERUUID", reachable=True):
         self.uuid = uuid
+        self._reachable = reachable
+
+    def isReachable(self):
+        return self._reachable
 
 
 class FakeSection(object):
@@ -695,6 +699,20 @@ class ForeignResolutionTest(KodiTestCase):
         self.assertIs(section, live)
         # live match refreshes the denormalized title
         self.assertEqual("Live Movies", record["section_title"])
+
+    def test_unreachable_server_resolves_to_a_placeholder_without_querying(self):
+        class FakeLib(object):
+            def sections(self):
+                raise AssertionError("sections() must not be called on an unreachable server")
+
+        server = FakeServer(reachable=False)
+        server.library = FakeLib()
+        manager = FakeManager([server])
+        record = {"server_uuid": "SERVERUUID", "section_key": "1",
+                  "server_name": "Away", "section_title": "Movies"}
+        section, offline = self.win.resolveForeignLibrary(record, manager=manager)
+        self.assertTrue(offline)
+        self.assertIsNone(section.server)
 
     def test_no_section_match_on_a_known_server_resolves_to_a_placeholder(self):
         class FakeLib(object):
