@@ -84,3 +84,33 @@ class FrameDecoder(object):
                 data[i] ^= mask[i % 4]
         self._buf = buf[off + n:]
         return opcode, bytes(data)
+
+
+def new_key():
+    return base64.b64encode(os.urandom(16)).decode()
+
+
+def handshake_request(host, key, origin="https://app.plex.tv"):
+    """The exact request wsprobe.py sent — live-verified against the relay."""
+    lines = [
+        "GET /ws HTTP/1.1",
+        "Host: %s" % host,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        "Sec-WebSocket-Key: %s" % key,
+        "Sec-WebSocket-Version: 13",
+        "Origin: %s" % origin,
+    ]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode()
+
+
+def handshake_response_status(head_bytes):
+    """Parse the response head; return the status, raise unless it is 101."""
+    first = head_bytes.split(b"\r\n", 1)[0].decode("latin-1")
+    parts = first.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        raise HandshakeError("unparseable handshake response: %r" % first)
+    status = int(parts[1])
+    if status != 101:
+        raise HandshakeError("handshake rejected: %s" % first)
+    return status

@@ -87,5 +87,40 @@ class CodecTest(unittest.TestCase):
         self.assertEqual(out, [(0x1, payload.encode())])
 
 
+class HandshakeTest(unittest.TestCase):
+    def test_request_matches_what_the_relay_accepts(self):
+        # wsprobe.py handshake, live-verified (docs/watch-together.md §12)
+        req = ws.handshake_request("pop-fra00.syncplay.plex.services",
+                                   "dGhlIHNhbXBsZSBub25jZQ==")
+        text = req.decode()
+        self.assertTrue(text.startswith("GET /ws HTTP/1.1\r\n"))
+        self.assertIn("Host: pop-fra00.syncplay.plex.services\r\n", text)
+        self.assertIn("Upgrade: websocket\r\n", text)
+        self.assertIn("Connection: Upgrade\r\n", text)
+        self.assertIn("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n", text)
+        self.assertIn("Sec-WebSocket-Version: 13\r\n", text)
+        self.assertIn("Origin: https://app.plex.tv\r\n", text)
+        self.assertTrue(text.endswith("\r\n\r\n"))
+
+    def test_new_key_is_valid_base64_of_16_bytes(self):
+        import base64
+        key = ws.new_key()
+        self.assertEqual(len(base64.b64decode(key)), 16)
+
+    def test_accepts_101(self):
+        head = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+        self.assertEqual(ws.handshake_response_status(head), 101)
+
+    def test_rejects_non_101(self):
+        head = b"HTTP/1.1 400 Bad Request\r\n"
+        with self.assertRaises(ws.HandshakeError) as ctx:
+            ws.handshake_response_status(head)
+        self.assertIn("400", str(ctx.exception))
+
+    def test_rejects_garbage(self):
+        with self.assertRaises(ws.HandshakeError):
+            ws.handshake_response_status(b"not http at all")
+
+
 if __name__ == "__main__":
     unittest.main()
