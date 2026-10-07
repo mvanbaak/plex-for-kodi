@@ -21,6 +21,13 @@ class HandshakeError(Exception):
     pass
 
 
+class ProtocolError(Exception):
+    pass
+
+
+MAX_FRAME = 1 << 20
+
+
 def encode_frame(payload, opcode=0x1):
     """Build a client->server frame (always masked, as the RFC requires)."""
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
@@ -71,6 +78,8 @@ class FrameDecoder(object):
                 return None
             n = struct.unpack(">Q", buf[2:10])[0]
             off = 10
+            if n > MAX_FRAME:
+                raise ProtocolError("declared frame length %d exceeds MAX_FRAME" % n)
         if masked:
             if len(buf) < off + 4:
                 return None
@@ -114,3 +123,142 @@ def handshake_response_status(head_bytes):
     if status != 101:
         raise HandshakeError("handshake rejected: %s" % first)
     return status
+
+
+class WSClient(object):
+    """One WebSocket connection with a reader thread.
+
+    on_open()          — after the 101, before any frame (send Hello here)
+    on_message(text)   — str payload of every text frame (reader thread)
+    on_close(reason)   — when the connection is gone (reader thread)
+
+    An exception raised inside on_open/on_message tears down the connection
+    and surfaces as on_close(reason).
+
+    No auto-reconnect: per-user state does not survive a disconnect (§5.8),
+    so a reconnect is a fresh session and the caller decides when to start
+    a new WSClient.
+    """
+
+    def __init__(self, host, port, on_message, on_open=None, on_close=None,
+                 use_ssl=True, timeout=15.0):
+        self.host = host
+        self.port = port
+        self.on_message = on_message
+        self.on_open = on_open
+        self.on_close = on_close
+        self.use_ssl = use_ssl
+        self.timeout = timeout
+        self._sock = None
+        self._wlock = threading.Lock()   # sendall() is NOT thread-safe (§5.9)
+        self._decoder = FrameDecoder()
+        self._stopped = threading.Event()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        reason = "connect failed"
+        try:
+            self._connect_once()
+            reason = "closed by peer"
+        except Exception as exc:
+            reason = repr(exc)
+        finally:
+            sock, self._sock = self._sock, None
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        if self.on_close:
+            self.on_close(reason)
+
+    def _connect_once(self):
+        raw = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        try:
+            if self.use_ssl:
+                # verification stays ON for *.syncplay.plex.services (§10.2)
+                ctx = ssl.create_default_context()
+                raw = ctx.wrap_socket(raw, server_hostname=self.host)
+            raw.settimeout(1.0)
+            raw.sendall(handshake_request(self.host, new_key()))
+            head = b""
+            while b"\r\n\r\n" not in head:
+                chunk = raw.recv(4096)
+                if not chunk:
+                    raise HandshakeError("connection closed during handshake")
+                head += chunk
+            head, rest = head.split(b"\r\n\r\n", 1)
+            handshake_response_status(head)
+            with self._wlock:
+                self._sock = raw
+            if self.on_open:
+                self.on_open()
+            self._read_loop(rest)
+        except Exception:
+            # _run's finally only closes self._sock, which is still None
+            # if the handshake never completed — close the raw fd here.
+            try:
+                raw.close()
+            except OSError:
+                pass
+            raise
+
+    def _read_loop(self, initial=b""):
+        for op, payload in self._decoder.feed(initial):
+            self._dispatch(op, payload)
+        while not self._stopped.is_set():
+            try:
+                chunk = self._sock.recv(65536)
+            except socket.timeout:
+                continue
+            except ssl.SSLWantReadError:
+                continue
+            if not chunk:
+                raise EOFError("server closed TCP")
+            for op, payload in self._decoder.feed(chunk):
+                self._dispatch(op, payload)
+
+    def _dispatch(self, op, payload):
+        if op == 0x9:                     # ping -> pong, immediately (§10.2)
+            self.send_raw(payload, 0xA)
+            return
+        if op == 0x8:                     # close
+            self._stopped.set()
+            return
+        if op in (0x1, 0x2):
+            if self.on_message:
+                self.on_message(payload.decode("utf-8", "replace"))
+
+    def send(self, obj):
+        """Serialise a dict to JSON and send it. Thread-safe."""
+        self.send_raw(json.dumps(obj).encode(), 0x1)
+
+    def send_raw(self, payload, opcode=0x1):
+        with self._wlock:
+            sock = self._sock
+            if sock is None:
+                raise OSError("not connected")
+            frame = encode_frame(payload, opcode)
+            try:
+                sock.sendall(frame)
+            except Exception:
+                # a partial frame on the wire corrupts the stream — the
+                # connection must be dead, not merely retried
+                self._stopped.set()
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                raise
+
+    def close(self):
+        self._stopped.set()
+        try:
+            if self._sock is not None:
+                self.send_raw(struct.pack(">H", 1000), 0x8)
+        except OSError:
+            pass
