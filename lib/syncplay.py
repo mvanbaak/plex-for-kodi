@@ -133,3 +133,126 @@ def sync_action(local_position, remote_position, paused, forward_delay):
     if diff > TEMPO_DIFF:
         return ("tempo", TEMPO_RATE)
     return None
+
+
+class Session(object):
+    """Protocol session for one connection. Transport-agnostic (no sockets).
+
+    on_state(remote)  — a remote (non-self) State was applied, per frame
+    on_roster(roster) — a List snapshot arrived
+    on_event(kind, key) — "left"/"joined" for a roster identity (§5.8)
+
+    An exception in a callback propagates to the transport loop and tears
+    down the connection (surfaced as WSClient's on_close reason) — callbacks
+    must not raise.
+
+    Drive outbound_state() at a steady 1 Hz: your echo cadence is every
+    peer's smoothness (§5.5).
+    """
+
+    def __init__(self, room, identity, on_state=None, on_roster=None,
+                 on_event=None):
+        self.room = room
+        self.identity = identity
+        self.on_state = on_state
+        self.on_roster = on_roster
+        self.on_event = on_event
+        self.relay_ignore = 0       # ignoringOnTheFly.server, live from wire (§5.9)
+        self.local_ignore = 0       # 1 = local-only correction, don't rebroadcast (§5.7)
+        self.latency = Latency()
+        self.remote = {"position": 0.0, "paused": True, "doSeek": False,
+                       "setBy": None}
+        self.roster = {}            # raw identity -> List entry
+        self.relay_hello = None
+        self.file = None            # parsed {ads, uri} of what's playing
+        self.self_echo = 0
+
+    def on_message(self, msg, now_mono=None):
+        if isinstance(msg, str):
+            try:
+                msg = json.loads(msg)
+            except ValueError:
+                return
+        if not isinstance(msg, dict):
+            return
+        if "Hello" in msg:
+            self.relay_hello = msg["Hello"]
+        elif "List" in msg:
+            self.roster = dict(msg["List"].get(self.room) or {})
+            if self.on_roster:
+                self.on_roster(dict(self.roster))
+        elif "Set" in msg:
+            self._on_set(msg["Set"])
+        elif "State" in msg:
+            self._on_state(msg["State"], now_mono)
+
+    def _on_set(self, sub):
+        if not isinstance(sub, dict):
+            return
+        ready = sub.get("ready")
+        if isinstance(ready, dict):
+            key = ready.get("username")
+            if key:
+                entry = self.roster.setdefault(key, {})
+                entry["isReady"] = ready.get("isReady")
+        user = sub.get("user")
+        if isinstance(user, dict):
+            for key, entry in user.items():
+                if not isinstance(entry, dict):
+                    continue
+                event = entry.get("event") or {}
+                if "left" in event or "joined" in event:
+                    kind = "left" if event.get("left") else "joined"
+                    if kind == "left":
+                        self.roster.pop(key, None)
+                    if self.on_event:
+                        self.on_event(kind, key)
+                self._take_file(entry.get("file"))
+        self._take_file(sub.get("file"))
+
+    def _take_file(self, file_obj):
+        if isinstance(file_obj, dict) and isinstance(file_obj.get("name"), str):
+            try:
+                self.file = json.loads(file_obj["name"])
+            except ValueError:
+                self.file = None
+
+    def _on_state(self, state, now_mono=None):
+        ig = state.get("ignoringOnTheFly") or {}
+        if "server" in ig:
+            try:
+                self.relay_ignore = int(ig["server"])
+            except (TypeError, ValueError):
+                pass
+        ping = state.get("ping") or {}
+        self.latency.on_state(ping,
+                              time.monotonic() if now_mono is None else now_mono)
+        ps = state.get("playstate") or {}
+        if is_self(ps.get("setBy"), self.identity):
+            self.self_echo += 1     # §5.5: our own echo — count, never apply
+            return
+        for key in ("position", "paused", "doSeek"):
+            if ps.get(key) is not None:
+                value = ps[key]
+                if key == "position":
+                    value = float(value)   # §5.5: never truncate the relay's float
+                self.remote[key] = value
+        self.remote["setBy"] = ps.get("setBy")
+        if self.on_state:
+            self.on_state(dict(self.remote))
+
+    def outbound_state(self, local, now_mono=None, now_epoch=None):
+        """One heartbeat frame (§5.5). Caller drives this at 1 Hz."""
+        mono = time.monotonic() if now_mono is None else now_mono
+        epoch = time.time() if now_epoch is None else now_epoch
+        return {"State": {
+            "ping": {"clientLatencyCalculation": mono,
+                     "clientRtt": self.latency.client_rtt,
+                     "serverRtt": self.latency.server_rtt,
+                     "latencyCalculation": epoch},
+            "playstate": {"doSeek": bool(local.get("doSeek", False)),
+                          "paused": bool(local.get("paused", True)),
+                          "position": int(local.get("position", 0)),
+                          "setBy": None},
+            "ignoringOnTheFly": {"client": self.local_ignore,
+                                 "server": self.relay_ignore}}}

@@ -206,3 +206,166 @@ class SyncActionTest(unittest.TestCase):
                                                remote_position=100.0, paused=True,
                                                forward_delay=3.0),
                           "paused target must ignore forward_delay")
+
+class SessionTest(unittest.TestCase):
+    def make(self):
+        ident = syncplay.build_identity("dev-a", "Kodi", 1000001)
+        self.events = []
+        self.states = []
+        self.rosters = []
+        sess = syncplay.Session(
+            room="ca8cfezmke4", identity=ident,
+            on_state=self.states.append,
+            on_roster=self.rosters.append,
+            on_event=lambda kind, key: self.events.append((kind, key)))
+        return sess, ident
+
+    def test_outbound_state_shape(self):
+        sess, _ = self.make()
+        msg = sess.outbound_state({"position": 1804, "paused": False,
+                                   "doSeek": True},
+                                  now_mono=2755.552, now_epoch=1791143688.11)
+        state = msg["State"]
+        self.assertEqual(state["playstate"],
+                         {"doSeek": True, "paused": False,
+                          "position": 1804, "setBy": None})
+        self.assertEqual(state["ping"]["clientLatencyCalculation"], 2755.552)
+        self.assertEqual(state["ping"]["latencyCalculation"], 1791143688.11)
+        self.assertEqual(state["ignoringOnTheFly"], {"client": 0, "server": 0})
+
+    def test_outbound_position_is_int_even_for_float_local(self):
+        sess, _ = self.make()
+        msg = sess.outbound_state({"position": 1806.0028, "paused": False},
+                                  now_mono=1.0, now_epoch=2.0)
+        pos = msg["State"]["playstate"]["position"]
+        self.assertIsInstance(pos, int)
+        self.assertEqual(pos, 1806)
+
+    def test_inbound_state_mirrors_relay_ignore_counter(self):
+        # §5.9 — the one field that decides whether the relay keeps relaying
+        sess, _ = self.make()
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.16},
+            "playstate": {"position": 100.0, "paused": False,
+                          "doSeek": False, "setBy": None},
+            "ignoringOnTheFly": {"server": 1}}}, now_mono=10.0)
+        self.assertEqual(sess.relay_ignore, 1)
+        outbound = sess.outbound_state({"position": 100},
+                                       now_mono=11.0, now_epoch=2.0)
+        self.assertEqual(outbound["State"]["ignoringOnTheFly"]["server"], 1)
+
+    def test_inbound_state_without_counter_leaves_relay_ignore_alone(self):
+        sess, _ = self.make()
+        sess.relay_ignore = 1
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.16},
+            "playstate": {"position": 5.0, "paused": True,
+                          "doSeek": False, "setBy": None}}}, now_mono=10.0)
+        self.assertEqual(sess.relay_ignore, 1, "pure relay tick has no counter")
+
+    def test_own_echo_is_counted_and_never_applied(self):
+        # §5.5: applying your own echo pins you at a stale position
+        sess, ident = self.make()
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.1},
+            "playstate": {"position": 42.0, "paused": False, "doSeek": False,
+                          "setBy": ident + "_"}}}, now_mono=5.0)
+        self.assertEqual(sess.self_echo, 1)
+        self.assertEqual(sess.remote["position"], 0.0)
+        self.assertEqual(self.states, [])
+
+    def test_remote_state_applied_as_float(self):
+        sess, _ = self.make()
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.16},
+            "playstate": {"position": 1806.0028346305862, "paused": False,
+                          "doSeek": False,
+                          "setBy": '{"deviceIdentifier":"other"}'}}},
+            now_mono=5.0)
+        self.assertEqual(sess.remote["position"], 1806.0028346305862)
+        self.assertIsInstance(sess.remote["position"], float)
+        self.assertEqual(len(self.states), 1)
+
+    def test_doseek_frame_is_reported_to_consumer(self):
+        sess, _ = self.make()
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.1},
+            "playstate": {"position": 900.0, "paused": False, "doSeek": True,
+                          "setBy": '{"deviceIdentifier":"other"}'}}},
+            now_mono=5.0)
+        self.assertTrue(sess.remote["doSeek"])
+        self.assertTrue(self.states[0]["doSeek"])
+
+    def test_latency_uses_wall_now_when_not_given(self):
+        sess, _ = self.make()
+        sess.on_message(json.dumps({"State": {
+            "ping": {"serverRtt": 0.2},
+            "playstate": {"position": 0.0, "paused": True,
+                          "doSeek": False, "setBy": None}}}))
+        self.assertEqual(sess.latency.server_rtt, 0.2,
+                         "str messages must parse (ws delivers str)")
+
+    def test_list_populates_roster_keyed_by_room(self):
+        sess, _ = self.make()
+        sess.on_message({"List": {"ca8cfezmke4": {
+            '{"deviceIdentifier":"d","deviceName":"K","userID":"1"}': {
+                "position": 0, "file": {}, "controller": False,
+                "isReady": None}}}})
+        self.assertEqual(len(sess.roster), 1)
+        self.assertEqual(self.rosters[0], sess.roster)
+
+    def test_list_for_other_room_ignores(self):
+        sess, _ = self.make()
+        sess.on_message({"List": {"otherroom": {"x": {}}}})
+        self.assertEqual(sess.roster, {})
+
+    def test_set_ready_updates_roster_entry(self):
+        sess, ident = self.make()
+        sess.roster[ident] = {"isReady": None}
+        sess.on_message({"Set": {"ready": {"username": ident,
+                                           "isReady": True,
+                                           "manuallyInitiated": True}}})
+        self.assertIs(sess.roster[ident]["isReady"], True)
+
+    def test_set_user_event_left_fires_and_drops_roster_entry(self):
+        # §5.8 — transport death reaches peers in ~0.2 s as this event
+        sess, ident = self.make()
+        sess.roster[ident] = {"isReady": True}
+        sess.on_message({"Set": {"user": {ident: {
+            "room": {"name": "ca8cfezmke4"}, "event": {"left": True}}}}})
+        self.assertEqual(self.events, [("left", ident)])
+        self.assertNotIn(ident, sess.roster)
+
+    def test_set_user_event_joined_fires(self):
+        sess, _ = self.make()
+        sess.on_message({"Set": {"user": {"someone-else": {
+            "room": {"name": "ca8cfezmke4"}, "event": {"joined": True}}}}})
+        self.assertEqual(self.events, [("joined", "someone-else")])
+
+    def test_set_user_file_arrives_double_encoded(self):
+        # §10.2: a file change arrives as Set.user, not as Set.file
+        sess, _ = self.make()
+        inner = json.dumps({"ads": {"playing": False},
+                            "uri": "server://x/metadata/1"}, separators=(",", ":"))
+        sess.on_message({"Set": {"user": {"me": {"file": {"name": inner}}}}})
+        self.assertEqual(sess.file["uri"], "server://x/metadata/1")
+
+    def test_set_file_echo_also_updates(self):
+        sess, _ = self.make()
+        inner = json.dumps({"ads": {"playing": False}, "uri": "u"},
+                           separators=(",", ":"))
+        sess.on_message({"Set": {"file": {"name": inner}}})
+        self.assertEqual(sess.file["uri"], "u")
+
+    def test_hello_response_stored(self):
+        sess, _ = self.make()
+        sess.on_message({"Hello": {"version": "1.6.4", "realversion": "1.6.5",
+                                   "features": {"readiness": True}}})
+        self.assertEqual(sess.relay_hello["realversion"], "1.6.5")
+
+    def test_garbage_messages_are_ignored(self):
+        sess, _ = self.make()
+        sess.on_message("not json at all")
+        sess.on_message([1, 2, 3])
+        sess.on_message({"unknown": {}})
+        self.assertEqual(sess.remote["position"], 0.0)
