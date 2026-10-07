@@ -84,3 +84,52 @@ def set_file(uri, playing=False):
     inner = json.dumps({"ads": {"playing": bool(playing)}, "uri": uri},
                        separators=(",", ":"))
     return {"Set": {"file": {"name": inner}}}
+
+
+class Latency(object):
+    """§6.1 latency compensation + forward-delay estimation.
+
+    serverRtt is our own clock skew, not the relay's (§5.5): it is
+    relayNow − the epoch latencyCalculation WE sent, so a fresh epoch stamp
+    every tick is what keeps it meaningful.
+    """
+
+    def __init__(self):
+        self.avg_rtt = 0.0
+        self.forward_delay = 0.0
+        self.client_rtt = 0.0     # last accepted sample (echoed outbound)
+        self.server_rtt = 0.0     # last value the relay reported (echoed back)
+
+    def on_state(self, ping, now_mono):
+        sr = ping.get("serverRtt")
+        if isinstance(sr, (int, float)):
+            self.server_rtt = sr
+        lc = ping.get("clientLatencyCalculation")
+        if not isinstance(lc, (int, float)):
+            return
+        client_rtt = now_mono - lc
+        if client_rtt < 0 or (isinstance(sr, (int, float)) and sr < 0):
+            return                      # §6.1: skip negative samples
+        self.client_rtt = client_rtt
+        if self.avg_rtt == 0:
+            self.avg_rtt = sr if isinstance(sr, (int, float)) and sr >= 0 else 0.0
+        self.avg_rtt = 0.85 * self.avg_rtt + 0.15 * client_rtt
+        self.forward_delay = self.avg_rtt / 2.0
+        if isinstance(sr, (int, float)) and sr < client_rtt:
+            self.forward_delay += client_rtt - sr   # clock-skew correction
+
+
+def sync_action(local_position, remote_position, paused, forward_delay):
+    """§6.2: decide what the player must do to converge. Pure arithmetic.
+
+    Returns None (stay), ("seek", target) or ("tempo", 0.95). The 0.95 is a
+    tempo change (Kodi 21+ only, feature-detected in Phase 2) — callers may
+    degrade it to a seek on older Kodi (§9).
+    """
+    target = remote_position + (0 if paused else forward_delay)
+    diff = local_position - target
+    if diff >= SEEK_AHEAD or diff <= SEEK_BEHIND:
+        return ("seek", target)
+    if diff > TEMPO_DIFF:
+        return ("tempo", TEMPO_RATE)
+    return None

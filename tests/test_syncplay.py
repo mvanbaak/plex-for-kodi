@@ -104,3 +104,105 @@ class BuildersTest(unittest.TestCase):
     def test_set_file_compact_inner(self):
         msg = syncplay.set_file("x")
         self.assertNotIn(" ", msg["Set"]["file"]["name"])
+
+class LatencyTest(unittest.TestCase):
+    def bootstrap(self, sr, lc, now):
+        lat = syncplay.Latency()
+        lat.on_state({"serverRtt": sr, "clientLatencyCalculation": lc}, now)
+        return lat
+
+    def test_first_sample_seeds_from_server_rtt(self):
+        # §6.1: if averageRtt == 0: averageRtt = ping.serverRtt
+        lat = self.bootstrap(sr=0.057, lc=100.0, now=100.1)
+        expected_avg = 0.85 * 0.057 + 0.15 * 0.1
+        self.assertAlmostEqual(lat.avg_rtt, expected_avg, places=6)
+        expected = expected_avg / 2 + (0.1 - 0.057)   # sr < clientRtt -> skew add
+        self.assertAlmostEqual(lat.forward_delay, expected, places=6)
+
+    def test_no_skew_add_when_server_rtt_is_larger(self):
+        lat = self.bootstrap(sr=3600.06, lc=100.0, now=100.1)
+        self.assertAlmostEqual(lat.forward_delay, lat.avg_rtt / 2, places=6)
+
+    def test_negative_client_rtt_sample_is_skipped(self):
+        lat = syncplay.Latency()
+        lat.on_state({"serverRtt": 0.05, "clientLatencyCalculation": 200.0}, 100.0)
+        self.assertEqual(lat.client_rtt, 0.0, "clock ahead of sample: skip")
+        self.assertEqual(lat.avg_rtt, 0.0)
+
+    def test_negative_server_rtt_sample_is_skipped(self):
+        lat = syncplay.Latency()
+        lat.on_state({"serverRtt": -3599.94, "clientLatencyCalculation": 100.0},
+                     100.1)
+        self.assertEqual(lat.client_rtt, 0.0)
+
+    def test_server_rtt_stored_for_outbound_echo_even_when_sample_skipped(self):
+        lat = syncplay.Latency()
+        lat.on_state({"serverRtt": -3599.94, "clientLatencyCalculation": 100.0},
+                     100.1)
+        self.assertEqual(lat.server_rtt, -3599.94)
+
+    def test_missing_client_latency_calculation_updates_nothing(self):
+        lat = syncplay.Latency()
+        lat.on_state({"serverRtt": 0.2}, 100.0)
+        self.assertEqual(lat.client_rtt, 0.0)
+        self.assertEqual(lat.server_rtt, 0.2, "serverRtt is echoed back out (§5.5)")
+
+    def test_ema_walk(self):
+        lat = syncplay.Latency()
+        lat.avg_rtt = 1.0
+        lat.on_state({"serverRtt": 1.0, "clientLatencyCalculation": 0.0}, 2.0)
+        self.assertAlmostEqual(lat.avg_rtt, 0.85 * 1.0 + 0.15 * 2.0, places=6)
+
+
+class SyncActionTest(unittest.TestCase):
+    def test_seeks_when_ahead_by_4_or_more(self):
+        action = syncplay.sync_action(local_position=104.0,
+                                      remote_position=100.0, paused=True,
+                                      forward_delay=0.0)
+        self.assertEqual(action, ("seek", 100.0))
+
+    def test_seeks_when_behind_by_more_than_1_75(self):
+        action = syncplay.sync_action(local_position=98.0,
+                                      remote_position=100.0, paused=True,
+                                      forward_delay=0.0)
+        self.assertEqual(action, ("seek", 100.0))
+
+    def test_boundary_1_75_exactly_seeks(self):
+        action = syncplay.sync_action(local_position=98.25,
+                                      remote_position=100.0, paused=True,
+                                      forward_delay=0.0)
+        self.assertEqual(action, ("seek", 100.0),
+                         "diff == -1.75 hits the inclusive seek bound (§6.2)")
+
+    def test_tempo_between_1_5_and_4(self):
+        action = syncplay.sync_action(local_position=102.0,
+                                      remote_position=100.0, paused=True,
+                                      forward_delay=0.0)
+        self.assertEqual(action, ("tempo", 0.95))
+
+    def test_no_action_inside_drift_band(self):
+        for local in (98.3, 99.0, 100.0, 101.4, 101.5):
+            self.assertIsNone(
+                syncplay.sync_action(local_position=local, remote_position=100.0,
+                                     paused=True, forward_delay=0.0),
+                "local=%r should be inside the band" % local)
+
+    def test_playing_target_includes_forward_delay(self):
+        # target = position + lastForwardDelay when not paused (§6.2)
+        action = syncplay.sync_action(local_position=100.0,
+                                      remote_position=100.0, paused=False,
+                                      forward_delay=3.0)
+        self.assertEqual(action, ("seek", 103.0),
+                         "local - (remote+delay) = -3 -> seek to 103; "
+                         "proves delay is in target")
+        action = syncplay.sync_action(local_position=98.0,
+                                      remote_position=100.0, paused=False,
+                                      forward_delay=3.0)
+        self.assertEqual(action, ("seek", 103.0),
+                         "local - 103 = -5 -> seek to target 103")
+
+    def test_paused_target_ignores_forward_delay(self):
+        self.assertIsNone(syncplay.sync_action(local_position=100.0,
+                                               remote_position=100.0, paused=True,
+                                               forward_delay=3.0),
+                          "paused target must ignore forward_delay")
