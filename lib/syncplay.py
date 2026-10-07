@@ -59,3 +59,28 @@ def is_self(set_by, identity):
     if not isinstance(theirs, dict) or not isinstance(mine, dict):
         return False
     return all(k in theirs and str(theirs[k]) == str(v) for k, v in mine.items())
+
+
+def hello(room, identity, version=VERSION):
+    """Hello, sent immediately on connect (§5.2)."""
+    return {"Hello": {"room": {"name": room},
+                      "username": identity,
+                      "version": version}}
+
+
+def list_request():
+    """Roster snapshot request (§5.3)."""
+    return {"List": {}}
+
+
+def set_ready(is_ready, manually_initiated=True):
+    """Readiness for the lobby/ready flow — sent only on change (§6.4)."""
+    return {"Set": {"ready": {"isReady": bool(is_ready),
+                              "manuallyInitiated": bool(manually_initiated)}}}
+
+
+def set_file(uri, playing=False):
+    """Announce what is playing (§5.4). name is double-encoded JSON."""
+    inner = json.dumps({"ads": {"playing": bool(playing)}, "uri": uri},
+                       separators=(",", ":"))
+    return {"Set": {"file": {"name": inner}}}

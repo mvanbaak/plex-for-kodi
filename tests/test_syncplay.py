@@ -73,3 +73,34 @@ class IdentityTest(unittest.TestCase):
         self.assertFalse(syncplay.is_self(None, ident))
         self.assertFalse(syncplay.is_self("not json", ident))
         self.assertFalse(syncplay.is_self(json.dumps(["list"]), ident))
+
+
+class BuildersTest(unittest.TestCase):
+    def test_hello_matches_wire_shape(self):
+        ident = syncplay.build_identity("d", "K", 1)
+        self.assertEqual(
+            syncplay.hello("ca8cfezmke4", ident),
+            {"Hello": {"room": {"name": "ca8cfezmke4"},
+                       "username": ident,
+                       "version": "1.6.4"}})
+
+    def test_list_request(self):
+        self.assertEqual(syncplay.list_request(), {"List": {}})
+
+    def test_set_ready(self):
+        self.assertEqual(
+            syncplay.set_ready(True, manually_initiated=True),
+            {"Set": {"ready": {"isReady": True, "manuallyInitiated": True}}})
+
+    def test_set_file_double_encodes_uri(self):
+        msg = syncplay.set_file("server://aaaa/com.plexapp.plugins.library/"
+                                "library/metadata/227117")
+        inner = json.loads(msg["Set"]["file"]["name"])   # name is a JSON string
+        self.assertEqual(inner["uri"],
+                         "server://aaaa/com.plexapp.plugins.library/"
+                         "library/metadata/227117")
+        self.assertEqual(inner["ads"], {"playing": False})
+
+    def test_set_file_compact_inner(self):
+        msg = syncplay.set_file("x")
+        self.assertNotIn(" ", msg["Set"]["file"]["name"])
