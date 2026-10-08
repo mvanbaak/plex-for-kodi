@@ -364,7 +364,7 @@ class SessionSupervisor(object):
     """
 
     def __init__(self, room, identity, token, ws_factory, transport=None,
-                 clock=None, abort=None, log=None):
+                 clock=None, abort=None, timer_factory=None, log=None):
         self.room = room
         self.identity = identity
         self.api = RoomsApi(token, transport=transport)
@@ -386,6 +386,7 @@ class SessionSupervisor(object):
         self._stop = threading.Event()
         self._thread = None
         self._client = None
+        self._heartbeat = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -405,6 +406,13 @@ class SessionSupervisor(object):
         if client:
             try:
                 client.close()
+            except Exception:
+                pass
+        hb, self._heartbeat = self._heartbeat, None
+        if hb:
+            try:
+                hb.cancel()
+                hb.join(timeout=1.0)
             except Exception:
                 pass
         thread = self._thread
@@ -493,6 +501,7 @@ class SessionSupervisor(object):
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
             self._send(syncplay.set_ready(True))
+            self._start_heartbeat()
 
         def on_message(text):
             session = self.session
@@ -503,6 +512,7 @@ class SessionSupervisor(object):
             state["open"] = False
             state["closed"] = True
             self.connected = False
+            self._stop_heartbeat()
 
         self.session = syncplay.Session(self.room.id, self.identity,
                                         on_state=self.on_state,
@@ -518,6 +528,7 @@ class SessionSupervisor(object):
         self._client = None
         self.connected = False
         self.session = None
+        self._stop_heartbeat()
         if opened and not self._stopping() and not self._gone and self.on_disconnected:
             self.on_disconnected()
         return opened
@@ -547,6 +558,38 @@ class SessionSupervisor(object):
         except Exception as exc:
             self.log("Watch Together: send failed ({0})".format(exc.__class__.__name__))
             return False
+
+    def _start_heartbeat(self):
+        """Start a real 1 Hz repeating timer (injected for testability)."""
+        self._stop_heartbeat()
+        if self.timer_factory is None:
+            from plexnet.util import RepeatingCounterTimer
+            self._heartbeat = RepeatingCounterTimer(1.0, self._heartbeat_tick)
+        else:
+            self._heartbeat = self.timer_factory(1.0, self._heartbeat_tick, repeat=True)
+
+    def _stop_heartbeat(self):
+        hb, self._heartbeat = self._heartbeat, None
+        if hb:
+            try:
+                hb.cancel()
+            except Exception:
+                pass
+
+    def _heartbeat_tick(self, tick=True):
+        if self._stopping() or not self.connected:
+            self._stop_heartbeat()
+            return
+        session = self.session
+        local = self._local
+        if session is None or local is None:
+            return
+        try:
+            self._send(session.outbound_state(local, self.clock.monotonic(),
+                                              self.clock.time()))
+        except Exception as exc:
+            self.log("Watch Together: heartbeat send failed ({0})".format(exc.__class__.__name__))
+            self._stop_heartbeat()
 ```
 
 - [ ] **Step 4: Run — must pass**
