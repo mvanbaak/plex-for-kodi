@@ -39,3 +39,18 @@ It currently holds Phase 1 as two commits on base `2707bbe7`:
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
    branch — token hygiene rules from the spec apply: no token values
    anywhere.
+
+## Phase 2 planning status
+
+Phase 2 (P4+P5, Kodi UI integration) is fully specified and planned:
+
+- Design spec: `docs/superpowers/specs/2026-10-08-watch-together-phase2-design.md`
+- Implementation plan: `docs/superpowers/plans/2026-10-08-watch-together-phase2.md`
+
+Both live under `docs/superpowers/`, so they never reach the squash branch.
+Squash mechanics for Phase 2 follow rules 1–5 above unchanged: when
+implementation on `feature/watch-together-impl` is complete, squash only the
+commits added after `66f6eedd` into a single
+`feat(watchtogether): Phase 2 Kodi UI integration` commit appended to
+`feature/watch-together-squash`, then verify with the tree diff and
+`uv run pytest -q` (baseline at Phase 1 exit: 805 passed).
