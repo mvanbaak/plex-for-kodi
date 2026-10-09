@@ -132,6 +132,9 @@ def eligible_invitees(token, item, owned, room_user_ids=(), fetch=None):
   `session.roster` with `isReady is True`, and self must be ready.
   `room.users` refreshes on the 15 s poll, so late invites count. A member who
   never joins blocks auto-start — the host presses **Start**.
+- **A room with no other members does not auto-start.** The intent is to wait
+  for invited people to join; a solo host starts with **Start** or by inviting
+  someone. (An empty "everyone ready" set is not treated as satisfied.)
 - **Start** = unpause self; the existing local-change path
   (`on_local_change('play')` → `send_now`) propagates `paused:false`, and guests
   unpause via `_apply_remote`.
