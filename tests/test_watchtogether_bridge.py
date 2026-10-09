@@ -258,6 +258,36 @@ class LifecycleTest(BridgeTestCase):
         self.assertEqual(self.toasts, [util.T(35059, "The Watch Together room has ended")])
         self.assertEqual(util.getSetting("watchtogether.last_room", ""), "")
 
+    def test_leave_releases_the_join_lock_before_blocking_calls(self):
+        # api.leave() can block 15s and sup.stop() joins the supervisor thread;
+        # holding _join_lock across either stalls a concurrent on_gone()/join().
+        bridge = self.bridge
+        lock_free = []
+
+        class LockProbeAPI(FakeAPI):
+            def leave(self, room_id):
+                got = bridge._join_lock.acquire(blocking=False)
+                lock_free.append(("api", got))
+                if got:
+                    bridge._join_lock.release()
+                FakeAPI.leave(self, room_id)
+
+        class LockProbeSup(FakeSupervisor):
+            def stop(self, timeout=None):
+                got = bridge._join_lock.acquire(blocking=False)
+                lock_free.append(("stop", got))
+                if got:
+                    bridge._join_lock.release()
+                FakeSupervisor.stop(self, timeout)
+
+        bridge.api = LockProbeAPI()
+        bridge.room = watchtogether.Room(ROOM_JSON)
+        bridge.supervisor = LockProbeSup()
+
+        bridge.leave()
+
+        self.assertEqual(lock_free, [("api", True), ("stop", True)])
+
     def test_join_feeds_the_gate_and_status(self):
         class JoinableSup(FakeSupervisor):
             pass
@@ -301,6 +331,26 @@ class LobbyTest(BridgeTestCase):
         self.bridge.api = Boom()
         self.bridge._poll_rooms()        # must not raise
         self.assertEqual(self.toasts, [])
+
+    def test_poll_survives_a_non_protocol_error(self):
+        # a malformed payload (not a WatchTogetherError) must not kill the
+        # lobby daemon thread
+        class Boom(object):
+            def rooms(self):
+                raise ValueError("bad payload")
+        self.bridge.api = Boom()
+        self.bridge._poll_rooms()        # must not raise
+        self.assertEqual(self.toasts, [])
+        self.assertEqual(self.bridge.rooms_cache, [])
+
+    def test_auto_join_non_protocol_error_is_logged_not_fatal(self):
+        def boom(room_id):
+            raise ValueError("bad payload")
+        self.bridge.join = boom
+        util.setSetting("watchtogether.last_room", "ca8cfezmke4")
+        self.bridge._auto_join("ca8cfezmke4")     # must not raise
+        self.assertEqual(util.getSetting("watchtogether.last_room", ""), "ca8cfezmke4",
+                         "a transient error must not forget the room")
 
 
 class StatusTest(BridgeTestCase):

@@ -64,15 +64,19 @@ class WatchTogetherBridge(object):
             if self._stop.wait(1.0):
                 break
             ticks += 1
-            sup = self.supervisor
-            if sup is None:
-                if not self._rooms_seeded or ticks % 15 == 0:
-                    self._poll_rooms()
-            else:
-                if sup.connected != self._was_connected:
-                    self._was_connected = sup.connected
-                    self.update_status()
-                self.push_local()
+            try:
+                sup = self.supervisor
+                if sup is None:
+                    if not self._rooms_seeded or ticks % 15 == 0:
+                        self._poll_rooms()
+                else:
+                    if sup.connected != self._was_connected:
+                        self._was_connected = sup.connected
+                        self.update_status()
+                    self.push_local()
+            except Exception:
+                # never let one bad tick kill the lobby/heartbeat thread
+                util.ERROR()
 
     def ensure_api(self):
         if self.api is None:
@@ -84,7 +88,9 @@ class WatchTogetherBridge(object):
     def _poll_rooms(self):
         try:
             rooms = self.ensure_api().rooms()
-        except watchtogether.WatchTogetherError as exc:
+        except Exception as exc:
+            # WatchTogetherError is expected (offline/HTTP); anything else is a
+            # payload bug — still swallow it so the lobby thread survives
             util.DEBUG_LOG("Watch Together: room poll failed: {0}".format(exc))
             return
         self.rooms_cache = rooms
@@ -114,7 +120,7 @@ class WatchTogetherBridge(object):
         def work():
             try:
                 self.room = self.ensure_api().room(sup.room.id)
-            except watchtogether.WatchTogetherError as exc:
+            except Exception as exc:
                 util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(exc))
 
         thread = threading.Thread(target=work, name="wt-room")
@@ -240,18 +246,23 @@ class WatchTogetherBridge(object):
             return sup
 
     def leave(self):
+        # Detach + reset under the lock, then do the blocking REST call and
+        # thread join outside it: holding _join_lock across api.leave() (up to
+        # 15s) and sup.stop() (joins the supervisor) would stall a concurrent
+        # on_gone()/join() — and on_gone() runs on the supervisor thread that
+        # stop() is waiting to join.
         with self._join_lock:
             sup, room = self.supervisor, self.room
-            if room is not None and self.api is not None:
-                try:
-                    self.api.leave(room.id)
-                except watchtogether.WatchTogetherError as exc:
-                    util.DEBUG_LOG("Watch Together: leave failed: {0}".format(exc))
-            if sup:
-                sup.stop()
             self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
+        if room is not None and self.api is not None:
+            try:
+                self.api.leave(room.id)
+            except watchtogether.WatchTogetherError as exc:
+                util.DEBUG_LOG("Watch Together: leave failed: {0}".format(exc))
+        if sup:
+            sup.stop()
 
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None
@@ -281,6 +292,9 @@ class WatchTogetherBridge(object):
             # dead room or dead token: forget it rather than retry every boot
             util.DEBUG_LOG("Watch Together: auto-join failed: {0}".format(exc))
             util.setSetting("watchtogether.last_room", "")
+        except Exception:
+            # transient/unexpected: log but keep last_room so the next boot retries
+            util.ERROR()
 
     # -- OSD status --------------------------------------------------------------
 
