@@ -3,9 +3,11 @@
 
 from __future__ import absolute_import
 
+import json
+import time
 import unittest
 
-from lib import watchtogether
+from lib import syncplay, watchtogether
 
 ROOM_JSON = {
     "id": "ca8cfezmke4",
@@ -160,223 +162,259 @@ class RoomsApiTest(unittest.TestCase):
             api.invite("ca8cfezmke4", [1000002])
 
 
-class FakeTimer(object):
-    def __init__(self, interval, callback, repeat=True, name=None):
-        self.interval = interval
-        self.callback = callback
-        self.repeat = repeat
-        self.name = name
-        self.canceled = False
-        self.joined = False
+class StubTransport(object):
+    """RoomsApi transport that always answers from ROOM_JSON (or a status)."""
 
-    def cancel(self):
-        self.canceled = True
-
-    def join(self, timeout=None):
-        self.joined = True
-
-
-class FakeTimerFactory(object):
-    def __init__(self):
+    def __init__(self, data=ROOM_JSON, status=200):
+        self.data = data
+        self.status = status
         self.calls = []
 
-    def __call__(self, interval, callback, repeat=True):
-        t = FakeTimer(interval, callback, repeat=repeat)
-        self.calls.append((interval, callback, repeat))
-        return t
+    def __call__(self, method, path, body=None, token=None):
+        self.calls.append((method, path, token))
+        if method == "DELETE":
+            return 200, None
+        if self.status != 200:
+            return self.status, None
+        if path == "/rooms":
+            return 200, {"rooms": [self.data]}
+        return 200, self.data
 
-class FakeWS(object):
-    def __init__(self, state=None):
+
+class FakeClient(object):
+    """Stands in for ws.WSClient: start() emulates connect, send() records."""
+
+    def __init__(self, factory, host, port, on_open, on_message, on_close, opens):
+        self.factory = factory
+        self.host = host
+        self.port = port
+        self.on_open = on_open
+        self.on_message = on_message
+        self.on_close = on_close
+        self.opens = opens
+        self.opened = False
+        self.closed = None
         self.sent = []
-        self.state = state or {"open": False, "ever": False, "closed": False}
-        self._on_open = None
-        self._on_message = None
-        self._on_close = None
-        self.started = False
-        self.closed = False
 
     def start(self):
-        self.started = True
+        if self.opens:
+            self.opened = True
+            self.on_open()
+        else:
+            self.closed = "refused"
+            self.on_close("refused")
 
     def send(self, obj):
+        if not self.opened or self.closed is not None:
+            raise RuntimeError("not connected")
         self.sent.append(obj)
-        if self.state.get("echo_on_send"):
-            pass
 
     def close(self):
-        self.closed = True
-        if self._on_close:
-            try:
-                self._on_close("close")
-            except Exception:
-                pass
+        if self.opened and self.closed is None:
+            self.closed = "closed"
+            self.on_close("closed")
 
-    def trigger_open(self):
-        if self._on_open:
-            self._on_open()
+    def drop(self):
+        """Remote hangup: socket dies without us calling close()."""
+        if self.closed is None:
+            self.closed = "dropped"
+            self.on_close("dropped")
 
-    def trigger_close(self):
-        if self._on_close:
-            self._on_close("close")
+    def states(self):
+        return [m for m in self.sent if "State" in m]
 
 
 class FakeWSFactory(object):
-    def __init__(self, ws=None):
-        self.ws = ws or FakeWS()
-        self.calls = []
+    def __init__(self, opens=True):
+        self.opens = opens
+        self.clients = []
+        self.times = []
 
     def __call__(self, host, port, on_open, on_message, on_close):
-        self.ws._on_open = on_open
-        self.ws._on_message = on_message
-        self.ws._on_close = on_close
-        self.calls.append((host, port))
-        return self.ws
+        self.times.append(time.monotonic())
+        client = FakeClient(self, host, port, on_open, on_message, on_close,
+                            opens=self.opens)
+        self.clients.append(client)
+        return client
 
 
-class FakeClock(object):
-    def __init__(self, t=0.0):
-        self.t = t
-        self.m = t
-
-    def time(self):
-        return self.t
-
-    def monotonic(self):
-        return self.m
-
-    def advance(self, s):
-        self.t += s
-        self.m += s
+def wait_for(predicate, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
-class TestSessionSupervisor(unittest.TestCase):
-    ROOM_JSON = {
-        "id": "ca8cfezmke4",
-        "title": "A Fazenda – S18 • E20",
-        "sourceUri": "server://x/metadata/227117",
-        "createdBy": 1000001,
-        "startsAt": 1791128438,
-        "updatedAt": 1791128438,
-        "endsAt": 1791139238,
-        "syncplayHost": "pop-fra00.syncplay.plex.services",
-        "syncplayPort": 7776,
-        "users": [
-            {"id": 1000001, "username": "owner", "title": "Owner", "uuid": "u1"},
-            {"id": 1000002, "username": "guest", "title": "Guest", "uuid": "u2"},
-        ],
-    }
+class SessionSupervisorTest(unittest.TestCase):
+    """Offline tests for lib/watchtogether.SessionSupervisor (spec: phase 2)."""
 
-    def _room(self):
-        return watchtogether.Room(self.ROOM_JSON)
+    def setUp(self):
+        self._saved = (watchtogether.POLL, watchtogether.BACKOFF, watchtogether.TICK)
+        watchtogether.POLL = 0.2       # exercised inside a couple of seconds
+        watchtogether.BACKOFF = (0.02, 0.04, 0.08)
+        watchtogether.TICK = 0.01
+        self.sup = None
 
-    def _identity(self):
-        return {"device": "d", "name": "n", "user": 1000002}
+    def tearDown(self):
+        (watchtogether.POLL, watchtogether.BACKOFF, watchtogether.TICK) = self._saved
+        if self.sup:
+            self.sup.stop(timeout=3.0)
 
-    def test_start_then_stop(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON))
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+    def make(self, transport=None, factory=None):
+        self.transport = transport if transport is not None else StubTransport()
+        self.factory = factory if factory is not None else FakeWSFactory()
+        self.sup = watchtogether.SessionSupervisor(
+            watchtogether.Room(ROOM_JSON), "me-identity", "token",
+            self.factory, transport=self.transport)
+        return self.sup
+
+    def open_client(self):
+        self.assertTrue(wait_for(lambda: self.factory.clients and self.factory.clients[0].opened),
+                        "supervisor never opened a socket")
+        return self.factory.clients[0]
+
+    def test_on_open_sends_hello_list_ready(self):
+        sup = self.make()
         sup.start()
-        sup.stop(timeout=0.01)
-        self.assertTrue(sup._stop.is_set())
-
-    def api(self, *responses):
-        transport = FakeTransport(list(responses))
-        return watchtogether.RoomsApi(token="tok", transport=transport), transport
-
-    def test_connect_open_sends_hello_list_setready(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON))
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
-        sup.start()
-        ws.trigger_open()
-        ws.trigger_close()
-        sup.stop(timeout=0.01)
-        self.assertTrue(ws.started)
-        self.assertTrue(len(ws.sent) >= 3)
-
-    def test_on_message_forwards_to_session_on_state(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON))
-        states = []
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
-        sup.on_state = lambda d: states.append(d)
-        sup.start()
-        ws.trigger_open()
-        ws._on_message('{"State":{"playstate":{"position":5,"paused":true,"doSeek":false,"setBy":"x"}}}')
-        ws.trigger_close()
-        sup.stop(timeout=0.01)
-        self.assertTrue(states)
-
-    def test_poll_room_refreshes_roster(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON), (200, dict(self.ROOM_JSON, users=self.ROOM_JSON['users'])))
-        roster = []
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
-        sup.on_roster = lambda d: roster.append(d)
-        sup.start()
-        ws.trigger_open()
-        ws.trigger_close()
-        sup.stop(timeout=0.01)
-
-    def test_poll_room_gone_calls_on_gone_and_stops(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON), (404, "gone"))
-        gone = []
-        clock = FakeClock(0.0)
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf, clock=clock)
-        sup.on_gone = lambda: gone.append(True)
-        sup.start()
-        ws.trigger_open()
-        ws.trigger_close()
-        clock.advance(10.0)  # let backoff pass
-        sup.stop(timeout=0.01)
-        self.assertTrue(gone)
+        client = self.open_client()
+        self.assertTrue(wait_for(lambda: len(client.sent) >= 3))
+        self.assertEqual(client.sent[0], syncplay.hello(ROOM_JSON["id"], "me-identity"))
+        self.assertEqual(client.sent[1], syncplay.list_request())
+        self.assertEqual(client.sent[2], syncplay.set_ready(True))
 
     def test_outbound_state_before_connect_only_stores(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON))
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
-        sup.start()
-        res = sup.outbound_state({"position": 1, "paused": True})
-        self.assertFalse(res)
-        sup.stop(timeout=0.01)
+        sup = self.make()
+        self.assertFalse(sup.outbound_state({"position": 1, "paused": True}))
+        self.assertEqual(sup._local["position"], 1)
 
     def test_outbound_state_sends_while_connected(self):
-        room = self._room()
-        identity = self._identity()
-        tf = FakeTimerFactory()
-        ws = FakeWS()
-        wsf = FakeWSFactory(ws)
-        api, _ = self.api((200, self.ROOM_JSON))
-        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup = self.make()
         sup.start()
-        ws.trigger_open()
-        res = sup.outbound_state({"position": 1, "paused": True})
-        self.assertTrue(res)
-        ws.trigger_close()
-        sup.stop(timeout=0.01)
+        client = self.open_client()
+        before = len(client.sent)
+        self.assertTrue(sup.outbound_state(
+            {"position": 42, "paused": False, "doSeek": False}))
+        self.assertTrue(wait_for(lambda: len(client.sent) > before))
+        state = client.states()[-1]
+        self.assertEqual(state["State"]["playstate"]["position"], 42)
+        self.assertEqual(state["State"]["playstate"]["paused"], False)
+
+    def test_outbound_state_after_drop_is_inert(self):
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        client.drop()
+        self.assertTrue(wait_for(lambda: not sup.connected))
+        self.assertFalse(sup.outbound_state({"position": 5, "paused": True}))
+
+    def test_failed_connects_back_off(self):
+        factory = FakeWSFactory(opens=False)
+        self.make(factory=factory)
+        self.sup.start()
+        self.assertTrue(wait_for(lambda: len(factory.clients) >= 4, timeout=5.0),
+                        "supervisor stopped re-dialing")
+        gaps = [b - a for a, b in zip(factory.times, factory.times[1:])]
+        # BACKOFF = (0.02, 0.04, 0.08): each gap is wider than the one before
+        self.assertGreaterEqual(gaps[1], gaps[0] + 0.005)
+        self.assertGreaterEqual(gaps[2], gaps[1] + 0.005)
+
+    def test_drop_fires_on_disconnected_then_redials(self):
+        factory = FakeWSFactory()
+        sup = self.make(factory=factory)
+        events = []
+        sup.on_disconnected = lambda: events.append("disc")
+        sup.start()
+        client = self.open_client()
+        client.drop()
+        self.assertTrue(wait_for(lambda: "disc" in events))
+        self.assertTrue(wait_for(lambda: len(factory.clients) >= 2))
+        self.assertTrue(wait_for(lambda: factory.clients[1].opened))
+
+    def test_session_is_fresh_per_attempt(self):
+        factory = FakeWSFactory()
+        sup = self.make(factory=factory)
+        sup.start()
+        client = self.open_client()
+        first = sup.session
+        self.assertIsNotNone(first)
+        client.drop()
+        self.assertTrue(wait_for(lambda: len(factory.clients) >= 2
+                                 and factory.clients[1].opened))
+        self.assertIsNot(sup.session, first, "a reconnect must be a fresh session (§5.8)")
+
+    def test_poll_delivers_rest_room(self):
+        sup = self.make()
+        rooms = []
+        sup.on_roster = rooms.append
+        sup.start()
+        self.assertTrue(wait_for(lambda: rooms))
+        self.assertEqual(rooms[0].id, ROOM_JSON["id"])
+        self.assertEqual(sup.room.syncplay_host, ROOM_JSON["syncplayHost"])
+
+    def test_relay_state_reaches_on_state(self):
+        sup = self.make()
+        states = []
+        sup.on_state = states.append
+        sup.start()
+        client = self.open_client()
+        client.on_message(json.dumps({"State": {"playstate": {
+            "position": 7.5, "paused": True, "doSeek": False,
+            "setBy": "someone-else"}}}))
+        self.assertTrue(wait_for(lambda: states))
+        self.assertEqual(states[0]["position"], 7.5)
+
+    def test_gone_room_fires_on_gone_once_and_never_leaves(self):
+        transport = StubTransport(status=404)
+        self.make(transport=transport)
+        gones = []
+        self.sup.on_gone = lambda: gones.append(1)
+        self.sup.start()
+        self.assertTrue(wait_for(lambda: not self.sup._thread.is_alive()))
+        self.assertEqual(gones, [1])
+        self.assertEqual(len(self.factory.clients), 0, "must not dial a gone room")
+        self.assertFalse(any(c[0] == "DELETE" for c in transport.calls),
+                         "on_gone never calls leave() (§4)")
+
+    def test_not_member_is_gone_too(self):
+        self.make(transport=StubTransport(status=403))
+        gones = []
+        self.sup.on_gone = lambda: gones.append(1)
+        self.sup.start()
+        self.assertTrue(wait_for(lambda: gones == [1]))
+        self.assertTrue(wait_for(lambda: not self.sup._thread.is_alive()))
+
+    def test_dead_token_is_gone_never_retried(self):
+        self.make(transport=StubTransport(status=401))
+        gones = []
+        self.sup.on_gone = lambda: gones.append(1)
+        self.sup.start()
+        self.assertTrue(wait_for(lambda: gones == [1]))
+        self.assertTrue(wait_for(lambda: not self.sup._thread.is_alive()))
+
+    def test_transient_poll_failure_keeps_the_socket(self):
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        self.transport.status = 500          # REST blip mid-session
+        self.assertTrue(wait_for(lambda: self.transport.calls.count(("GET", "/rooms/ca8cfezmke4", "token")) >= 2))
+        self.assertTrue(sup.connected)
+        self.assertEqual(len(self.factory.clients), 1)
+
+    def test_stop_interrupts_backoff(self):
+        watchtogether.BACKOFF = (5.0,)
+        self.make(factory=FakeWSFactory(opens=False))
+        self.sup.start()
+        self.assertTrue(wait_for(lambda: len(self.factory.clients) == 1))
+        started = time.monotonic()
+        self.sup.stop(timeout=3.0)
+        self.assertLess(time.monotonic() - started, 2.0,
+                        "stop() must not sit behind a backoff sleep")
+        self.assertIsNone(self.sup._thread)
+
+    def test_stop_is_idempotent(self):
+        self.make()
+        self.sup.stop()
+        self.sup.stop()
+        self.assertIsNone(self.sup._thread)
