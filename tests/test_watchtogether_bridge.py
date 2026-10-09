@@ -85,9 +85,13 @@ class FakePlayer(object):
         self.paused = paused
         self.controls = []
         self.seek_times = []
+        self.videos = []
         self.handler = FakeHandler()
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+
+    def playVideo(self, video, resume=False):
+        self.videos.append((video, resume))
 
     def isPlaying(self):
         return self.playing
@@ -439,10 +443,37 @@ class StatusTest(BridgeTestCase):
         self.assertEqual(self.read(), "")
 
 
+class PlaybackStartTest(BridgeTestCase):
+    """_start_room_playback: the guarded guest join-playback (§6.4)."""
+
+    def room(self):
+        return watchtogether.Room(ROOM_JSON)
+
+    def test_skips_when_the_supervisor_was_replaced(self):
+        stale = FakeSupervisor()
+        self.bridge.supervisor = FakeSupervisor()   # a different one
+        self.bridge._start_room_playback(self.room(), stale)
+        self.assertEqual(self.player.videos, [])
+
+    def test_skips_when_a_video_is_already_playing(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = True
+        self.bridge._start_room_playback(self.room(), sup)
+        self.assertEqual(self.player.videos, [])
+
+    def test_no_source_server_leaves_playback_alone(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = False
+        # SERVERMANAGER is absent in tests: resolve yields nothing, no crash
+        self.bridge._start_room_playback(self.room(), sup)
+        self.assertEqual(self.player.videos, [])
+
+
 class SourceUriTest(KodiTestCase):
     """parse_source_uri: the room sourceUri -> (machine, ratingKey) mapping
     used to start the room's content on join (§6.4)."""
-
     def test_bare_server_uri(self):
         self.assertEqual(
             wtwin.parse_source_uri(

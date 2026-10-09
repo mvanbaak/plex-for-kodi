@@ -234,9 +234,12 @@ class SessionSupervisor(object):
 
     def _inbox_push(self, text):
         with self._inbox_lock:
-            self._inbox.append(text)
+            # stamp at receive: a blocking apply ahead of it must not inflate
+            # this frame's client_rtt (§6.1)
+            self._inbox.append((text, self.clock.monotonic()))
             if len(self._inbox) > 512:
                 self._inbox.popleft()
+                self.log("Watch Together: inbound backlog dropped a frame")
         self._inbox_event.set()
 
     def _inbox_drain(self):
@@ -246,11 +249,11 @@ class SessionSupervisor(object):
                 if not self._inbox:
                     self._inbox_event.clear()
                     return
-                text = self._inbox.popleft()
+                text, mono = self._inbox.popleft()
             if session is None:
                 continue
             try:
-                session.on_message(text, self.clock.monotonic())
+                session.on_message(text, mono)
             except Exception:
                 pass
 
@@ -347,6 +350,7 @@ class SessionSupervisor(object):
         with self._inbox_lock:
             self._inbox.clear()
         self._inbox_event.clear()
+        self._seek_pending = False      # state is per-connection (§5.8)
         self.session = syncplay.Session(self.room.id, self.identity,
                                         on_state=self.on_state,
                                         on_event=self.on_event)

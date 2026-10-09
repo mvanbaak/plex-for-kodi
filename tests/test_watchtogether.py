@@ -384,6 +384,29 @@ class SessionSupervisorTest(unittest.TestCase):
                                  and factory.clients[1].opened))
         self.assertIsNot(sup.session, first, "a reconnect must be a fresh session (§5.8)")
 
+    def test_file_is_re_announced_on_reconnect(self):
+        factory = FakeWSFactory()
+        sup = self.make(factory=factory)
+        sup.start()
+        self.open_client().drop()
+        self.assertTrue(wait_for(lambda: len(factory.clients) >= 2
+                                 and factory.clients[1].opened))
+        self.assertTrue(wait_for(lambda: syncplay.set_file(ROOM_JSON["sourceUri"])
+                                 in factory.clients[1].sent))
+
+    def test_seek_pending_does_not_survive_reconnect(self):
+        factory = FakeWSFactory()
+        sup = self.make(factory=factory)
+        sup.start()
+        self.open_client()
+        sup.request_seek()
+        self.factory.clients[0].drop()
+        self.assertTrue(wait_for(lambda: len(factory.clients) >= 2
+                                 and factory.clients[1].opened))
+        self.assertFalse(any(m["State"]["playstate"]["doSeek"]
+                             for m in factory.clients[1].states()),
+                         "doSeek is per-connection state (§5.8)")
+
     def test_poll_delivers_rest_room(self):
         sup = self.make()
         rooms = []

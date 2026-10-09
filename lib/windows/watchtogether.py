@@ -305,12 +305,14 @@ class WatchTogetherBridge(object):
             self.update_status()
         # outside the lock: starting playback is heavy and must not block a
         # concurrent leave()/on_gone()
-        self._start_room_playback(room)
+        self._start_room_playback(room, sup)
         return sup
 
-    def _start_room_playback(self, room):
+    def _start_room_playback(self, room, sup):
         """Guest flow (§6.4): open the room's content so the relay's State can
         seek/play it. Best effort — a failure leaves the user to start it."""
+        if self.supervisor is not sup:
+            return                      # left or rejoined while we fetched
         if player.PLAYER.isPlayingVideo():
             return
         machine, rating_key = parse_source_uri(room.source_uri)
@@ -328,6 +330,7 @@ class WatchTogetherBridge(object):
                 util.DEBUG_LOG("Watch Together: room item not found")
                 return
             player.PLAYER.playVideo(items[0], resume=False)
+            player.PLAYER.control("pause")   # §6.4: join paused, relay seeks
             util.DEBUG_LOG("Watch Together: started room playback")
         except Exception:
             util.ERROR()
