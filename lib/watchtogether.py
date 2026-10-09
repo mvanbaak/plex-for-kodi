@@ -9,6 +9,7 @@ never read or log a 401 body — it leaks internal service URLs.
 
 from __future__ import absolute_import
 
+import collections
 import threading
 import requests
 
@@ -181,6 +182,13 @@ class SessionSupervisor(object):
         self._client = None
         self._heartbeat = None
         self._hb_stop = None
+        # inbound frames are queued by the WS reader thread and processed on
+        # the supervisor thread: a remote apply (seek) can block for seconds
+        # and must not stall frame reads (§5.8)
+        self._inbox = collections.deque()
+        self._inbox_lock = threading.Lock()
+        self._inbox_event = threading.Event()
+        self._seek_pending = False
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -218,6 +226,33 @@ class SessionSupervisor(object):
         bridge that also ticks at 1 Hz, would double the frame rate."""
         self._local = local
         return self.connected
+
+    def request_seek(self):
+        """Flag the next outbound State as a seek command (§5.6). The bridge
+        calls this on a local seek; exactly one tick carries doSeek: true."""
+        self._seek_pending = True
+
+    def _inbox_push(self, text):
+        with self._inbox_lock:
+            self._inbox.append(text)
+            if len(self._inbox) > 512:
+                self._inbox.popleft()
+        self._inbox_event.set()
+
+    def _inbox_drain(self):
+        session = self.session
+        while True:
+            with self._inbox_lock:
+                if not self._inbox:
+                    self._inbox_event.clear()
+                    return
+                text = self._inbox.popleft()
+            if session is None:
+                continue
+            try:
+                session.on_message(text, self.clock.monotonic())
+            except Exception:
+                pass
 
     def _loop(self):
         started = False
@@ -290,15 +325,17 @@ class SessionSupervisor(object):
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
             self._send(syncplay.set_ready(True))
+            # §5.8: state is per-connection — re-announce the file on every
+            # (re)connect, not just on the first join
+            if self.room.source_uri:
+                self._send(syncplay.set_file(self.room.source_uri))
             self._start_heartbeat()
 
         def on_message(text):
-            session = self.session
-            if session:
-                try:
-                    session.on_message(text, self.clock.monotonic())
-                except Exception:
-                    pass
+            # reader thread: queue only. Processing (and the remote apply it
+            # triggers) runs on the supervisor thread, so a blocking seek
+            # cannot stall frame reads and get us reaped (§5.8).
+            self._inbox_push(text)
 
         def on_close(reason):
             state["open"] = False
@@ -307,6 +344,9 @@ class SessionSupervisor(object):
             self._stop_heartbeat()
 
         from . import syncplay
+        with self._inbox_lock:
+            self._inbox.clear()
+        self._inbox_event.clear()
         self.session = syncplay.Session(self.room.id, self.identity,
                                         on_state=self.on_state,
                                         on_event=self.on_event)
@@ -339,8 +379,8 @@ class SessionSupervisor(object):
                 last_poll = self.clock.monotonic()
                 if self._poll_room() is False:
                     break
-            if self._stop.wait(TICK):
-                break
+            self._inbox_event.wait(TICK)
+            self._inbox_drain()
         return state["ever"]
 
     def _start_heartbeat(self):
@@ -379,7 +419,12 @@ class SessionSupervisor(object):
             return
         # seed a lobby snapshot if the bridge has not fed one yet: an empty
         # _local must never mean "send nothing" (that is the 13 s reap)
-        local = self._local or {"position": 0, "paused": True, "doSeek": False}
+        local = dict(self._local or {"position": 0, "paused": True, "doSeek": False})
+        if self._seek_pending:
+            # §5.6: doSeek is a command for exactly one tick, then back to a
+            # plain position report
+            local["doSeek"] = True
+            self._seek_pending = False
         try:
             client.send(session.outbound_state(local, self.clock.monotonic(),
                                                self.clock.time()))

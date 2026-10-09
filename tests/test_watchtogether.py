@@ -284,6 +284,25 @@ class SessionSupervisorTest(unittest.TestCase):
         self.assertEqual(client.sent[1], syncplay.list_request())
         self.assertEqual(client.sent[2], syncplay.set_ready(True))
 
+    def test_on_open_announces_the_rooms_file(self):
+        # §5.8: state is per-connection — the file must be re-announced on
+        # every (re)connect, not just the first join
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        self.assertTrue(wait_for(lambda: syncplay.set_file(ROOM_JSON["sourceUri"])
+                                 in client.sent))
+
+    def test_request_seek_marks_exactly_one_outbound_state(self):
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        sup.request_seek()
+        self.assertTrue(wait_for(lambda: any(
+            m["State"]["playstate"]["doSeek"] for m in client.states())))
+        marked = [m for m in client.states() if m["State"]["playstate"]["doSeek"]]
+        self.assertEqual(len(marked), 1, "doSeek is true for exactly one tick (§5.6)")
+
     def test_outbound_state_before_connect_only_stores(self):
         sup = self.make()
         self.assertFalse(sup.outbound_state({"position": 1, "paused": True}))

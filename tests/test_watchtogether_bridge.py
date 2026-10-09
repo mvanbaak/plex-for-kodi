@@ -51,10 +51,14 @@ class FakeSupervisor(object):
         self.room = watchtogether.Room(ROOM_JSON)
         self.sent = []
         self.stopped = False
+        self.seek_requested = False
 
     def outbound_state(self, local):
         self.sent.append(local)
         return self.connected
+
+    def request_seek(self):
+        self.seek_requested = True
 
     def stop(self, timeout=None):
         self.stopped = True
@@ -172,6 +176,19 @@ class SnapshotTest(BridgeTestCase):
         self.bridge.on_local_change("pause")
         self.assertEqual(len(self.bridge.supervisor.sent), 1)
 
+    def test_local_seek_requests_a_seek_command(self):
+        # §5.6: the outbound State must carry doSeek: true, not just position
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_local_change("seek")
+        self.assertTrue(sup.seek_requested)
+
+    def test_local_pause_does_not_request_a_seek(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_local_change("pause")
+        self.assertFalse(sup.seek_requested)
+
 
 class RemoteApplyTest(BridgeTestCase):
     def remote(self, position, paused):
@@ -210,6 +227,15 @@ class RemoteApplyTest(BridgeTestCase):
         self.bridge.on_state(self.remote(self.player.position + 0.5, paused=False))
         self.assertEqual(self.player.controls, [])
         self.assertEqual(self.player.seek_times, [])
+
+    def test_remote_doseek_applies_inside_the_band(self):
+        # §5.6: an explicit peer seek is a command, applied even when the
+        # position is close enough that drift correction would stay put
+        self.bridge.supervisor = FakeSupervisor()
+        target = self.player.position + 0.5
+        self.bridge.on_state({"position": target, "paused": False,
+                              "doSeek": True, "setBy": "other-identity"})
+        self.assertEqual(self.player.seek_times, [target])
 
     def test_no_video_playback_is_left_alone(self):
         self.player.video = False

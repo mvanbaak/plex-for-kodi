@@ -156,6 +156,10 @@ class WatchTogetherBridge(object):
     def on_local_change(self, kind):
         """Kodi fired onPlayBack* for a local event (the gate let it through)."""
         util.DEBUG_LOG("Watch Together: local {0}, broadcasting state".format(kind))
+        sup = self.supervisor
+        if kind == "seek" and sup is not None:
+            # §5.6: a local seek is a command, not just a position report
+            sup.request_seek()
         self.push_local()
 
     # -- relay -> kodi ---------------------------------------------------------
@@ -192,7 +196,13 @@ class WatchTogetherBridge(object):
             player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
             player.PLAYER.control("pause" if want_paused else "play")
             applied = True
-        if action and action[0] == "seek":
+        if remote.get("doSeek"):
+            # §5.6: a peer's explicit seek command — apply even inside the
+            # drift band, where sync_action would stay put
+            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
+            self._seek_to(remote.get("position", 0.0))
+            applied = True
+        elif action and action[0] == "seek":
             player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(action[1])
             applied = True
