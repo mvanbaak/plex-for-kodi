@@ -546,6 +546,61 @@ class LocalChangeGraceTest(BridgeTestCase):
         self.assertEqual(self.player.controls, ["pause"])
 
 
+class TempoTest(BridgeTestCase):
+    def tempo_state(self, delta):
+        return {"position": self.player.position - delta, "paused": False,
+                "doSeek": False, "setBy": "other-identity"}
+
+    def patch_rpc(self, calls, fail=False):
+        class RPCPlayer(object):
+            def GetActivePlayers(self):
+                return [{"playerid": 1, "type": "video"}]
+
+            def SetTempo(self, playerid, tempo):
+                if fail:
+                    raise RuntimeError("no tempo")
+                calls.append((playerid, tempo))
+
+        class RPC(object):
+            Player = RPCPlayer()
+        return RPC()
+
+    def test_kodi_21_uses_set_tempo(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))       # ~2s ahead
+            self.bridge.on_state(self.tempo_state(0.2))       # back in the band
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(calls, [(1, 0.95), (1, 1.0)], "slow then reset")
+        self.assertEqual(self.player.seek_times, [], "tempo needs no seek")
+
+    def test_old_kodi_degrades_to_a_seek(self):
+        saved_major = wtwin.util.KODI_VERSION_MAJOR
+        wtwin.util.KODI_VERSION_MAJOR = 20
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR = saved_major
+        self.assertEqual(self.player.seek_times, [self.player.position - 2.0])
+
+    def test_set_tempo_failure_degrades_to_a_seek(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc([], fail=True)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(self.player.seek_times, [self.player.position - 2.0])
+
+
 class SourceUriTest(KodiTestCase):
     """parse_source_uri: the room sourceUri -> (machine, ratingKey) mapping
     used to start the room's content on join (§6.4)."""

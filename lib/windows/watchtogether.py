@@ -176,6 +176,8 @@ class WatchTogetherBridge(object):
         self._join_lock = threading.Lock()
         self._auto_join_done = False
         self._local_change_at = 0.0
+        self._tempo = 1.0
+        self._tempo_unavailable = False
         self._was_connected = False
 
     # -- startup ------------------------------------------------------------
@@ -394,25 +396,63 @@ class WatchTogetherBridge(object):
         if want_paused is not None and want_paused != is_paused:
             pl.wt_applying_remote = time.monotonic() + 2.0
             pl.control("pause" if want_paused else "play")
+            self._set_tempo(1.0)
             applied = True
         if remote.get("doSeek"):
             # §5.6: a peer's explicit seek command — apply even inside the
             # drift band, where sync_action would stay put
             pl.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(remote.get("position", 0.0))
+            self._set_tempo(1.0)
             applied = True
         elif action and action[0] == "seek":
             pl.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(action[1])
+            self._set_tempo(1.0)
             applied = True
         elif action and action[0] == "tempo":
-            # §6.2's gentle catch-up is deferred: v1 is hard-seek only (§9),
-            # so drift in the 1.5–4.0 s band waits for the 4.0 s seek bound
-            util.DEBUG_LOG("Watch Together: tempo catch-up deferred (v1 hard-seek)")
+            # §6.2 gentle catch-up: slow to 0.95 with pitch preserved (Kodi 21+)
+            if not self._set_tempo(action[1]):
+                # no tempo here: degrade to a hard seek so drift still converges
+                target = remote.get("position", 0.0) + \
+                    (0 if remote.get("paused") else session.latency.forward_delay)
+                pl.wt_applying_remote = time.monotonic() + 2.0
+                self._seek_to(target)
+                applied = True
+        else:
+            self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
             util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
         # we have the room's position now: our own position may be published
         sup.mark_synced()
+
+    def _set_tempo(self, tempo):
+        """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
+        (Kodi 21+ only). Returns True when applied; logs and returns False when
+        the Kodi is too old or the call fails, so the caller can hard-seek."""
+        if tempo == self._tempo:
+            return True
+        if util.KODI_VERSION_MAJOR < 21:
+            if not self._tempo_unavailable:
+                self._tempo_unavailable = True
+                util.DEBUG_LOG("Watch Together: tempo catch-up needs Kodi 21+ "
+                               "(have {0}); degrading to hard seek".format(
+                                   util.KODI_VERSION_MAJOR))
+            return False
+        try:
+            players = util.rpc.Player.GetActivePlayers() or []
+            playerid = next((p["playerid"] for p in players
+                             if p.get("type") == "video"), None)
+            if playerid is None:
+                return False
+            util.rpc.Player.SetTempo(playerid=playerid, tempo=tempo)
+            self._tempo = tempo
+            util.DEBUG_LOG("Watch Together: tempo {0}".format(tempo))
+            return True
+        except Exception as exc:
+            util.ERROR("Watch Together: SetTempo failed: {0}".format(exc))
+            self._tempo = 1.0
+            return False
 
     def _seek_to(self, target):
         """Through the seek dialog when it exists (it owns the full local seek
@@ -521,21 +561,24 @@ class WatchTogetherBridge(object):
         """Open the room's content in the normal video player window, so space,
         the OSD and stop all behave as usual. Playback stops -> we end the
         session (socket closed, peers told), but keep membership so the tile
-        can rejoin. Blocks until playback ends; must run on the main thread."""
+        can rejoin. Returns the player window's exit command (the caller
+        processes it, like preplay does); must run on the main thread."""
         pl = _player()
         if pl is None or pl.isPlayingVideo():
-            return
+            return None
         item = self._room_media_item(room)
         if item is None:
-            return
+            return None
         from . import videoplayer
+        command = None
         try:
-            videoplayer.play(video=item)
+            command = videoplayer.play(video=item)
         except Exception:
             util.ERROR()
         finally:
             if self.supervisor is not None:
                 self.disconnect()
+        return command
 
     def disconnect(self):
         """End the session without DELETE: closing the socket tells peers we
@@ -570,28 +613,28 @@ class WatchTogetherBridge(object):
 
     def room_clicked(self, room):
         """Hub tile click: join and watch, switch, or (already watching) open
-        participants. Playback stops -> leave, so a later click rejoins."""
+        participants. Playback stops -> leave, so a later click rejoins.
+        Returns the video window's exit command, if any, for the caller."""
         sup = self.supervisor
         if sup is not None and self.room is not None and self.room.id == room.id:
             if _player() is not None and _player().isPlayingVideo():
                 ParticipantsDialog.open()
-            else:
-                self._watch_room(room)      # in the room but not watching
-            return
+                return None
+            return self._watch_room(room)   # in the room but not watching
         leave_first = sup is not None
         if leave_first:
             if not confirm_switch():
-                return
+                return None
         elif not confirm_takeover(room):
-            return
+            return None
         try:
             self._join_or_switch(room.id, leave_first)
         except Exception as exc:
             util.DEBUG_LOG("Watch Together: join failed: {0}".format(
                 exc.__class__.__name__))
             util.showNotification(str(exc))
-            return
-        self._watch_room(room)
+            return None
+        return self._watch_room(room)
 
     @busy.dialog()
     def _join_or_switch(self, room_id, leave_first):

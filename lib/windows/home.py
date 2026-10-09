@@ -3044,7 +3044,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
         if self._isWatchTogetherItem(mli.dataSource):
             from . import watchtogether as wtwin
-            wtwin.bridge.room_clicked(mli.dataSource.room)
+            command = wtwin.bridge.room_clicked(mli.dataSource.room)
+            if command:
+                self.processCommand(command)
             return
 
         # auto resume for in-progress items
