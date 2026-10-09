@@ -85,6 +85,26 @@ def room_info_rows(room, live_ids):
     return rows
 
 
+def lobby_rows(room, roster, live_ids):
+    """One row per room user for the lobby, with readiness status.
+
+    Status is "Ready" when the user's id is on the roster with isReady True,
+    else "Invited" (they have not joined/readied yet). `live_ids` is accepted
+    for parity with room_info_rows; readiness already implies a live roster
+    entry, so it does not affect the status."""
+    ready = syncplay.ready_member_ids(roster)
+    rows = []
+    for user in (room.participants if room else []):
+        if not isinstance(user, dict):
+            continue
+        rows.append({
+            "title": user.get("title") or user.get("username") or "",
+            "thumb": user.get("thumb") or "",
+            "status": "Ready" if str(user.get("id")) in ready else "Invited",
+        })
+    return rows
+
+
 class WatchTogetherRoomItem(object):
     """One room tile. Not a PlexObject — the home renderer must not treat it
     as media, so `get()` is inert and `cachable` is False."""
@@ -210,6 +230,9 @@ class WatchTogetherBridge(object):
         self._tempo = 1.0
         self._tempo_retry_at = 0.0
         self._was_connected = False
+        self._player_ready = False
+        self._started = False
+        self.lobby = None       # the open LobbyDialog, if any (Task 8)
 
     # -- startup ------------------------------------------------------------
 
@@ -241,6 +264,7 @@ class WatchTogetherBridge(object):
                         self.update_status()
                     self.push_local()
                     self._update_ready(sup)
+                    self._maybe_auto_start()
             except Exception:
                 # never let one bad tick kill the lobby/heartbeat thread
                 util.ERROR()
@@ -368,7 +392,34 @@ class WatchTogetherBridge(object):
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
                      and not xbmc.getCondVisibility("Player.Caching"))
+        self._player_ready = ready
         sup.set_ready(ready)
+
+    def _maybe_auto_start(self):
+        """Start the room once every user in room.users except self is on the
+        roster and ready, and self is ready (§6.4). A member who never joins
+        blocks it — the host presses Start instead."""
+        if self._started or not self._player_ready:
+            return
+        sup = self.supervisor
+        room = self.room
+        if sup is None or sup.session is None or room is None:
+            return
+        self_id = str(getattr(plexapp.ACCOUNT, "ID", None))
+        others = [uid for uid in room.user_ids if str(uid) != self_id]
+        if others and syncplay.members_ready(others, sup.session.roster):
+            self.start_playback()
+
+    def start_playback(self):
+        """Start the room: unpause self (§6.4). The local-change path then
+        broadcasts paused:false, so guests unpause via _apply_remote."""
+        pl = _player()
+        if pl is not None:
+            pl.control("play")
+        sup = self.supervisor
+        if sup is not None:
+            sup.send_now()
+        self._started = True
 
     def on_local_change(self, kind):
         """Kodi fired onPlayBack* for a local event (the gate let it through)."""
@@ -379,6 +430,7 @@ class WatchTogetherBridge(object):
             sup.request_seek()
         if kind == "play" and sup is not None:
             # the user pressed play: that is a manual readiness (§6.4)
+            self._player_ready = True
             sup.set_ready(True, manually=True)
         # a local change must win: send it now and hold off incoming states
         # briefly, or a peer's older State reverts it (last-setBy-wins, but
@@ -528,6 +580,17 @@ class WatchTogetherBridge(object):
     def on_event(self, kind, key):
         util.DEBUG_LOG("Watch Together: roster {0}".format(kind))
 
+    def _on_ready(self, key, is_ready):
+        """A peer's readiness changed (§6.4). Refresh the open lobby and start
+        the room once everyone is ready. Supervisor thread — never raise."""
+        try:
+            refresh = getattr(self.lobby, "refresh", None)
+            if refresh is not None:
+                refresh()
+            self._maybe_auto_start()
+        except Exception:
+            util.ERROR()
+
     def on_gone(self, sup=None):
         """Room ended / removed / dead token — supervisor thread. Teardown,
         no DELETE (§4). Dialogs notice supervisor=None and close themselves.
@@ -569,6 +632,7 @@ class WatchTogetherBridge(object):
         sup.on_disconnected = self.on_disconnected
         sup.on_gone = lambda s=sup: self.on_gone(s)
         sup.on_event = self.on_event
+        sup.on_ready = self._on_ready
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor
@@ -576,6 +640,7 @@ class WatchTogetherBridge(object):
             self.room = room
             self.supervisor = sup
             self._was_connected = False
+            self._started = False
             pl = _player()
             if pl is not None:
                 pl.wt_broadcast = self.on_local_change
@@ -732,6 +797,7 @@ class WatchTogetherBridge(object):
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
+        self._started = False
         if forget_room:
             util.setSetting("watchtogether.last_room", "")
         self.update_status()

@@ -501,6 +501,20 @@ class SessionSupervisorTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: states))
         self.assertEqual(states[0]["position"], 7.5)
 
+    def test_relay_ready_reaches_on_ready(self):
+        # §6.4: the bridge learns a peer readied up through the supervisor's
+        # on_ready, not by reading the session directly
+        sup = self.make()
+        seen = []
+        sup.on_ready = lambda key, is_ready: seen.append((key, is_ready))
+        sup.start()
+        client = self.open_client()
+        identity = syncplay.build_identity("d", "n", 1)
+        client.on_message(json.dumps({"Set": {"ready": {
+            "username": identity, "isReady": True}}}))
+        self.assertTrue(wait_for(lambda: seen))
+        self.assertEqual(seen[0], (identity, True))
+
     def test_gone_room_fires_on_gone_once_and_never_leaves(self):
         transport = StubTransport(status=404)
         self.make(transport=transport)

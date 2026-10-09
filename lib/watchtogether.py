@@ -183,6 +183,7 @@ class SessionSupervisor(object):
         self.on_disconnected = None
         self.on_gone = None
         self.on_event = None
+        self.on_ready = None
 
         self.session = None
         self.connected = False
@@ -394,7 +395,8 @@ class SessionSupervisor(object):
         self._seek_pending = False      # state is per-connection (§5.8)
         self.session = syncplay.Session(self.room.id, self.identity,
                                         on_state=self.on_state,
-                                        on_event=self.on_event)
+                                        on_event=self.on_event,
+                                        on_ready=self.on_ready)
         client = self.ws_factory(self.room.syncplay_host, self.room.syncplay_port,
                                  on_open, on_message, on_close)
         self._client = client

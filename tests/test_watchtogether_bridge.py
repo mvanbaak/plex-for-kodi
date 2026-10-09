@@ -13,7 +13,7 @@ import time
 from kodienv import ENV
 
 ENV.abort_requested = True
-from lib import util, watchtogether  # noqa: E402
+from lib import syncplay, util, watchtogether  # noqa: E402
 from lib.windows import watchtogether as wtwin  # noqa: E402
 from kodi_six import xbmcgui  # noqa: E402
 
@@ -43,6 +43,7 @@ class FakeLatency(object):
 class FakeSession(object):
     latency = FakeLatency()
     remote = {"position": 0.0}
+    roster = {}
 
 
 class FakeSupervisor(object):
@@ -236,6 +237,93 @@ class ReadinessTest(BridgeTestCase):
         self.bridge.supervisor = sup
         self.bridge.on_local_change("pause")
         self.assertIsNone(sup.ready_manual)
+
+
+class LobbyRowsTest(KodiTestCase):
+    """lobby_rows: the lobby's participant list with Ready/Invited status."""
+
+    def room(self, users):
+        return watchtogether.Room({"users": users})
+
+    def test_lobby_rows_marks_ready_and_invited(self):
+        room = self.room([{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
+        roster = {syncplay.build_identity("d", "n", 1): {"isReady": True}}
+        rows = wtwin.lobby_rows(room, roster, live_ids={"1", "2"})
+        self.assertEqual([r["status"] for r in rows], ["Ready", "Invited"])
+        self.assertEqual([r["title"] for r in rows], ["A", "B"])
+
+    def test_lobby_rows_falls_back_to_username_and_thumb(self):
+        room = self.room([{"id": 1, "username": "u1", "thumb": "/t.png"}])
+        rows = wtwin.lobby_rows(room, {}, live_ids=set())
+        self.assertEqual(rows, [{"title": "u1", "thumb": "/t.png",
+                                 "status": "Invited"}])
+
+
+class AutoStartTest(BridgeTestCase):
+    """_maybe_auto_start / _on_ready / start_playback: §6.4 readiness gate."""
+
+    def room(self, user_ids):
+        return watchtogether.Room({"users": [{"id": i, "title": str(i)}
+                                             for i in user_ids]})
+
+    def fire_ready(self, roster):
+        """A peer's Set{ready} reached the bridge (Session wrote the roster)."""
+        self.bridge.supervisor.session.roster = roster
+        self.bridge._on_ready(None, None)
+
+    def test_start_playback_unpauses_and_broadcasts(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_auto_start_when_all_members_ready(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1, 2])
+        self.bridge._player_ready = True
+        self.fire_ready({
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": True}})
+        self.assertIn("play", self.player.controls)
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_auto_start_holds_when_a_member_missing(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1, 2])
+        self.bridge._player_ready = True
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+        self.assertEqual(getattr(self.bridge.supervisor, "sent_now", 0), 0)
+
+    def test_auto_start_holds_until_self_is_ready(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1])
+        self.bridge._player_ready = False
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+
+    def test_auto_start_runs_only_once(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1])
+        self.bridge._player_ready = True
+        roster = {syncplay.build_identity("d", "n", 1): {"isReady": True}}
+        self.fire_ready(roster)
+        self.fire_ready(roster)
+        self.assertEqual(self.player.controls, ["play"])
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_ready_refreshes_the_open_lobby(self):
+        class FakeLobby(object):
+            refreshed = 0
+
+            def refresh(self):
+                self.refreshed += 1
+
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.fire_ready({})
+        self.assertEqual(lobby.refreshed, 1)
 
 
 class RemoteApplyTest(BridgeTestCase):
