@@ -832,6 +832,19 @@
             <texturenofocus{% if theme.buttons.useNoFocusColor %} colordiffuse="{{ theme.buttons.noFocusColor|default('99FFFFFF') }}"{% endif %}>script.plex/buttons/player/modern/vs10.png</texturenofocus>
             <label> </label>
         </control>
+        <control type="button" id="433">
+            <visible>!String.IsEmpty(Window(10000).Property(watchtogether.status))</visible>
+            <hitrect x="28" y="28" w="69" h="45" />
+            <posx>0</posx>
+            <posy>0</posy>
+            <width>125</width>
+            <height>{{ vscale(101) }}</height>
+            <ondown>501</ondown>
+            <font>font12</font>
+            <texturefocus{% if theme.buttons.useFocusColor %} colordiffuse="{{ theme.buttons.focusColor|default("FFE5A00D") }}"{% endif %}>script.plex/buttons/player/modern/watchtogether.png</texturefocus>
+            <texturenofocus{% if theme.buttons.useNoFocusColor %} colordiffuse="{{ theme.buttons.noFocusColor|default('99FFFFFF') }}"{% endif %}>script.plex/buttons/player/modern/watchtogether.png</texturenofocus>
+            <label> </label>
+        </control>
     </control>
 
     <control type="group">
