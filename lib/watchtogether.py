@@ -179,6 +179,8 @@ class SessionSupervisor(object):
         self._stop = threading.Event()
         self._thread = None
         self._client = None
+        self._heartbeat = None
+        self._hb_stop = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -200,6 +202,7 @@ class SessionSupervisor(object):
                 client.close()
             except Exception:
                 pass
+        self._stop_heartbeat()
         thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout)
@@ -287,6 +290,7 @@ class SessionSupervisor(object):
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
             self._send(syncplay.set_ready(True))
+            self._start_heartbeat()
 
         def on_message(text):
             session = self.session
@@ -300,6 +304,7 @@ class SessionSupervisor(object):
             state["open"] = False
             state["closed"] = True
             self.connected = False
+            self._stop_heartbeat()
 
         from . import syncplay
         self.session = syncplay.Session(self.room.id, self.identity,
@@ -313,6 +318,7 @@ class SessionSupervisor(object):
             client.close()
         except Exception:
             pass
+        self._stop_heartbeat()
         self._client = None
         self.connected = False
         self.session = None
@@ -326,35 +332,57 @@ class SessionSupervisor(object):
     def _pump(self, client, state):
         client.start()
         last_poll = self.clock.monotonic()
-        last_state = self.clock.monotonic()
         while not self._stopping():
             if state["closed"]:
                 break
-            now = self.clock.monotonic()
-            if state["open"] and now - last_poll >= POLL:
-                last_poll = now
+            if state["open"] and self.clock.monotonic() - last_poll >= POLL:
+                last_poll = self.clock.monotonic()
                 if self._poll_room() is False:
                     break
-            # the supervisor is the single State sender: the bridge only
-            # stores the snapshot, this loop puts one frame on the wire per
-            # second (§5.5). A live-but-silent socket is reaped in ~13 s (§5.8).
-            if state["open"] and now - last_state >= HEARTBEAT:
-                last_state = now
-                self._send_state()
             if self._stop.wait(TICK):
                 break
         return state["ever"]
 
+    def _start_heartbeat(self):
+        self._stop_heartbeat()
+        ev = threading.Event()
+        self._hb_stop = ev
+        thread = threading.Thread(target=self._heartbeat_loop, args=(ev,),
+                                  name="wt-heartbeat")
+        thread.daemon = True
+        thread.start()
+        self._heartbeat = thread
+
+    def _stop_heartbeat(self):
+        thread, self._heartbeat = self._heartbeat, None
+        ev, self._hb_stop = self._hb_stop, None
+        if ev:
+            ev.set()
+        if (thread is not None and thread is not threading.current_thread()
+                and thread.is_alive()):
+            thread.join(HEARTBEAT + 1.0)
+
+    def _heartbeat_loop(self, ev):
+        # A dedicated thread, NOT the poll loop: a slow REST poll (up to 15 s)
+        # must never stall the 1 Hz State — the relay reaps a ~13 s gap (§5.8).
+        # This is the single State sender; the bridge only stores the snapshot.
+        while not self._stopping() and not ev.is_set():
+            if ev.wait(HEARTBEAT):
+                return
+            if self.connected:
+                self._send_state()
+
     def _send_state(self):
         session = self.session
-        if session is None:
+        client = self._client
+        if session is None or client is None or not self.connected:
             return
         # seed a lobby snapshot if the bridge has not fed one yet: an empty
         # _local must never mean "send nothing" (that is the 13 s reap)
         local = self._local or {"position": 0, "paused": True, "doSeek": False}
         try:
-            self._send(session.outbound_state(local, self.clock.monotonic(),
-                                              self.clock.time()))
+            client.send(session.outbound_state(local, self.clock.monotonic(),
+                                               self.clock.time()))
         except Exception as exc:
             self.log("Watch Together: state send failed ({0})".format(exc.__class__.__name__))
 

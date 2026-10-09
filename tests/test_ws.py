@@ -360,6 +360,33 @@ class WSClientTest(unittest.TestCase):
         for payload in relay.frames:
             json.loads(payload)
 
+    def test_close_frame_is_echoed_and_stops(self):
+        client = ws.WSClient("127.0.0.1", 1, on_message=lambda t: None)
+        sent = []
+        client.send_raw = lambda payload, opcode=0x1: sent.append((payload, opcode))
+        client._dispatch(0x8, b"\x03\xe8")
+        self.assertEqual(sent, [(b"\x03\xe8", 0x8)])
+        self.assertTrue(client._stopped.is_set())
+
+    def test_read_loop_stops_at_a_close_before_later_frames(self):
+        client = ws.WSClient("127.0.0.1", 1, on_message=lambda t: None)
+        sent = []
+        client.send_raw = lambda payload, opcode=0x1: sent.append((payload, opcode))
+        chunk = ws.encode_frame(b"", 0x8) + ws.encode_frame(b"ignored", 0x1)
+
+        class OneChunk(object):
+            def __init__(self, data):
+                self.data = data
+
+            def recv(self, n):
+                data, self.data = self.data, b""
+                return data
+
+        client._sock = OneChunk(chunk)
+        client._read_loop()
+        self.assertTrue(client._stopped.is_set())
+        self.assertEqual(sent, [(b"", 0x8)], "only the close is echoed")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -328,19 +328,21 @@ class SessionTest(unittest.TestCase):
             "peer": {"position": 0, "file": {"name": inner}}}}})
         self.assertEqual(sess.file["uri"], "server://x/metadata/9")
 
-    def test_non_object_file_payload_is_ignored(self):
+    def test_non_object_file_payload_keeps_the_current_file(self):
+        # §5.4a: a truncated/non-object peer frame must not wipe the room file
         sess, _ = self.make()
         sess.file = {"uri": "old"}
         sess.on_message({"Set": {"file": {"name": "123"}}})
-        self.assertIsNone(sess.file)
+        self.assertEqual(sess.file, {"uri": "old"})
 
-    def test_non_numeric_position_does_not_drop_the_frame(self):
+    def test_unparseable_position_drops_the_whole_frame(self):
+        # applying pause/seek with a stale position would move every peer to it
         sess, _ = self.make()
         sess.on_message({"State": {"playstate": {
             "position": "not-a-number", "paused": True,
             "setBy": '{"deviceIdentifier":"other"}'}}}, now_mono=5.0)
         self.assertEqual(sess.remote["position"], 0.0)
-        self.assertEqual(len(self.states), 1, "pause is still applied")
+        self.assertEqual(self.states, [])
 
     def test_set_ready_updates_roster_entry(self):
         sess, ident = self.make()

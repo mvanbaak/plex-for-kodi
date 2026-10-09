@@ -312,6 +312,16 @@ class SessionSupervisorTest(unittest.TestCase):
         self.assertEqual(state["position"], 0)
         self.assertTrue(state["paused"])
 
+    def test_outbound_state_only_stores_never_sends(self):
+        # the 1 Hz heartbeat is the single sender (§5.5)
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        sup.outbound_state({"position": 7, "paused": True})
+        self.assertFalse(any(m["State"]["playstate"]["position"] == 7
+                             for m in client.states()),
+                         "outbound_state must not put a frame on the wire")
+
     def test_outbound_state_after_drop_is_inert(self):
         sup = self.make()
         sup.start()

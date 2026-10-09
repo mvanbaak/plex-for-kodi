@@ -228,10 +228,11 @@ class Session(object):
         try:
             parsed = json.loads(file_obj["name"])
         except ValueError:
-            parsed = None
-        # §5.4a: the relay validates nothing — a truncated/missing uri or a
-        # non-object payload must not crash the session
-        self.file = parsed if isinstance(parsed, dict) else None
+            return
+        # §5.4a: the relay validates nothing. Only a well-formed object replaces
+        # the current file — one truncated peer frame must not wipe it.
+        if isinstance(parsed, dict):
+            self.file = parsed
 
     def _on_state(self, state, now_mono=None):
         ig = state.get("ignoringOnTheFly") or {}
@@ -254,7 +255,8 @@ class Session(object):
                     try:
                         value = float(value)   # §5.5: never truncate the float
                     except (TypeError, ValueError):
-                        continue
+                        return   # unparseable frame: applying a stale position
+                                 # would seek every peer to it — drop the frame
                 self.remote[key] = value
         self.remote["setBy"] = ps.get("setBy")
         if self.on_state:

@@ -238,6 +238,8 @@ class WSClient(object):
     def _read_loop(self, initial=b""):
         for op, payload in self._decoder.feed(initial):
             self._dispatch(op, payload)
+            if self._stopped.is_set():
+                return
         while not self._stopped.is_set():
             try:
                 chunk = self._sock.recv(65536)
@@ -249,6 +251,8 @@ class WSClient(object):
                 raise EOFError("server closed TCP")
             for op, payload in self._decoder.feed(chunk):
                 self._dispatch(op, payload)
+                if self._stopped.is_set():
+                    return
 
     def _dispatch(self, op, payload):
         if op == 0x9:                     # ping -> pong, immediately (§10.2)

@@ -271,6 +271,15 @@ class LifecycleTest(BridgeTestCase):
         self.bridge.on_gone()
         self.assertEqual(self.toasts, [])
 
+    def test_stale_gone_callback_is_ignored(self):
+        # a supervisor we already replaced must not tear down the new one
+        current = FakeSupervisor()
+        self.bridge.supervisor = current
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.on_gone(FakeSupervisor())
+        self.assertIs(self.bridge.supervisor, current)
+        self.assertEqual(self.toasts, [])
+
     def test_leave_releases_the_join_lock_before_blocking_calls(self):
         # api.leave() can block 15s and sup.stop() joins the supervisor thread;
         # holding _join_lock across either stalls a concurrent on_gone()/join().

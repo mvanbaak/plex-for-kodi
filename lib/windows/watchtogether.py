@@ -223,20 +223,26 @@ class WatchTogetherBridge(object):
     def on_event(self, kind, key):
         util.DEBUG_LOG("Watch Together: roster {0}".format(kind))
 
-    def on_gone(self):
+    def on_gone(self, sup=None):
         """Room ended / removed / dead token — supervisor thread. Teardown,
-        no DELETE (§4). Dialogs notice supervisor=None and close themselves."""
-        if self.supervisor is None:
-            # already left/detached: a NotMember poll after our own DELETE is
-            # our departure, not a room that ended — do not announce it
-            return
-        util.showNotification(util.T(35059, "The Watch Together room has ended"))
+        no DELETE (§4). Dialogs notice supervisor=None and close themselves.
+
+        `sup` is the supervisor that fired; when it is not the current one the
+        callback is stale (we already left/rejoined) and must be ignored."""
         with self._join_lock:
-            sup, self.supervisor = self.supervisor, None
+            current = self.supervisor
+            if current is None:
+                # already left/detached: a NotMember poll after our own DELETE
+                # is our departure, not a room that ended — do not announce it
+                return
+            if sup is not None and current is not sup:
+                return
+            self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
-        if sup:
-            sup.stop()
+        util.showNotification(util.T(35059, "The Watch Together room has ended"))
+        if current:
+            current.stop()
 
     # -- join / leave -----------------------------------------------------------
 
@@ -255,7 +261,7 @@ class WatchTogetherBridge(object):
         sup.on_state = self.on_state
         sup.on_roster = self.on_roster
         sup.on_disconnected = self.on_disconnected
-        sup.on_gone = self.on_gone
+        sup.on_gone = lambda s=sup: self.on_gone(s)
         sup.on_event = self.on_event
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
