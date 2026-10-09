@@ -90,20 +90,24 @@ class WatchTogetherBridge(object):
             rooms = self.ensure_api().rooms()
         except Exception as exc:
             # WatchTogetherError is expected (offline/HTTP); anything else is a
-            # payload bug — still swallow it so the lobby thread survives
-            util.DEBUG_LOG("Watch Together: room poll failed: {0}".format(exc))
+            # payload bug — still swallow it so the lobby thread survives.
+            # class name only: the room id is a credential (§7)
+            util.DEBUG_LOG("Watch Together: room poll failed: {0}".format(exc.__class__.__name__))
             return
         self.rooms_cache = rooms
+        current = set(r.id for r in rooms)
         if not self._rooms_seeded:
             # first paint: remember, never toast what was already there
             self._rooms_seeded = True
-            self._seen_rooms = set(r.id for r in rooms)
+            self._seen_rooms = current
             return
         for room in rooms:
             if room.id not in self._seen_rooms:
-                self._seen_rooms.add(room.id)
                 util.showNotification(
                     util.T(35058, "New Watch Together room: {}").format(room.title))
+        # prune gone ids so a room re-created later can toast again, and the
+        # set cannot grow without bound
+        self._seen_rooms = current
 
     def refresh_rooms(self):
         """Fire-and-forget poll for a dialog that wants fresh data now."""
@@ -121,7 +125,8 @@ class WatchTogetherBridge(object):
             try:
                 self.room = self.ensure_api().room(sup.room.id)
             except Exception as exc:
-                util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(exc))
+                util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
+                    exc.__class__.__name__))
 
         thread = threading.Thread(target=work, name="wt-room")
         thread.daemon = True
@@ -130,13 +135,17 @@ class WatchTogetherBridge(object):
     # -- local -> relay -------------------------------------------------------
 
     def push_local(self):
-        """Heartbeat (§5.5): the bridge feeds at 1 Hz, the supervisor sends."""
+        """Feed the supervisor's snapshot at 1 Hz (§5.5). The supervisor sends;
+        this only updates what it will send."""
         sup = self.supervisor
         if sup is None:
             return
         # isPlayingVideo, not isPlaying: theme music runs through this same
-        # player and would otherwise push audio position at remote videos
+        # player. We still must emit a State while in the lobby (audio or no
+        # playback) or the relay reaps the silent socket in ~13 s (§5.8) — but
+        # it is an idle video state, never the theme's position.
         if not player.PLAYER.isPlayingVideo():
+            sup.outbound_state({"position": 0, "paused": True, "doSeek": False})
             return
         sup.outbound_state({
             "position": int(player.PLAYER.getTime() or 0),
@@ -173,15 +182,22 @@ class WatchTogetherBridge(object):
         action = syncplay.sync_action(local_pos, remote.get("position", 0.0),
                                       remote.get("paused", True),
                                       session.latency.forward_delay)
-        # arm BEFORE the first apply: the echo can arrive after we return
-        player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
         want_paused = remote.get("paused")
         is_paused = bool(xbmc.getCondVisibility("Player.Paused"))
+        applied = False
+        # arm the echo deadline only when we actually change something: remote
+        # States arrive ~1 Hz, so arming on every frame would keep the gate
+        # closed and swallow every genuine local event (design §Echo)
         if want_paused is not None and want_paused != is_paused:
+            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
             player.PLAYER.control("pause" if want_paused else "play")
+            applied = True
         if action and action[0] == "seek":
+            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(action[1])
-        util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
+            applied = True
+        if applied:
+            util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
 
     def _seek_to(self, target):
         """Through the seek dialog when it exists (it owns the full local seek
@@ -210,13 +226,17 @@ class WatchTogetherBridge(object):
     def on_gone(self):
         """Room ended / removed / dead token — supervisor thread. Teardown,
         no DELETE (§4). Dialogs notice supervisor=None and close themselves."""
+        if self.supervisor is None:
+            # already left/detached: a NotMember poll after our own DELETE is
+            # our departure, not a room that ended — do not announce it
+            return
         util.showNotification(util.T(35059, "The Watch Together room has ended"))
         with self._join_lock:
             sup, self.supervisor = self.supervisor, None
-            if sup:
-                sup.stop()
             self.room = None
             self._reset_player_link(forget_room=True)
+        if sup:
+            sup.stop()
 
     # -- join / leave -----------------------------------------------------------
 
@@ -224,17 +244,22 @@ class WatchTogetherBridge(object):
         with self._join_lock:
             if self.supervisor is not None:
                 return self.supervisor
-            room = self.ensure_api().room(room_id)     # raises Auth/NotMember/Gone
-            identity = syncplay.build_identity(plex.CLIENT_ID, plex.getFriendlyName(),
-                                               plexapp.ACCOUNT.ID)
-            sup = watchtogether.SessionSupervisor(room, identity,
-                                                  plexapp.ACCOUNT.authToken,
-                                                  _ws_factory, log=util.DEBUG_LOG)
-            sup.on_state = self.on_state
-            sup.on_roster = self.on_roster
-            sup.on_disconnected = self.on_disconnected
-            sup.on_gone = self.on_gone
-            sup.on_event = self.on_event
+        # fetch + build outside the lock: the REST call can block 15s and must
+        # not stall a concurrent leave()/on_gone()
+        room = self.ensure_api().room(room_id)     # raises Auth/NotMember/Gone
+        identity = syncplay.build_identity(plex.CLIENT_ID, plex.getFriendlyName(),
+                                           plexapp.ACCOUNT.ID)
+        sup = watchtogether.SessionSupervisor(room, identity,
+                                              plexapp.ACCOUNT.authToken,
+                                              _ws_factory, log=util.DEBUG_LOG)
+        sup.on_state = self.on_state
+        sup.on_roster = self.on_roster
+        sup.on_disconnected = self.on_disconnected
+        sup.on_gone = self.on_gone
+        sup.on_event = self.on_event
+        with self._join_lock:
+            if self.supervisor is not None:   # someone joined while we fetched
+                return self.supervisor
             sup.start()
             self.room = room
             self.supervisor = sup
@@ -260,7 +285,8 @@ class WatchTogetherBridge(object):
             try:
                 self.api.leave(room.id)
             except watchtogether.WatchTogetherError as exc:
-                util.DEBUG_LOG("Watch Together: leave failed: {0}".format(exc))
+                util.DEBUG_LOG("Watch Together: leave failed: {0}".format(
+                    exc.__class__.__name__))
         if sup:
             sup.stop()
 
@@ -290,7 +316,8 @@ class WatchTogetherBridge(object):
             self.join(room_id)
         except watchtogether.WatchTogetherError as exc:
             # dead room or dead token: forget it rather than retry every boot
-            util.DEBUG_LOG("Watch Together: auto-join failed: {0}".format(exc))
+            util.DEBUG_LOG("Watch Together: auto-join failed: {0}".format(
+                exc.__class__.__name__))
             util.setSetting("watchtogether.last_room", "")
         except Exception:
             # transient/unexpected: log but keep last_room so the next boot retries
@@ -368,7 +395,11 @@ class RoomPickerDialog(kodigui.BaseDialog, util.CronReceiver):
     def joinRoom(self, room_id):
         try:
             bridge.join(room_id)
-        except watchtogether.WatchTogetherError as exc:
+        except Exception as exc:
+            # WatchTogetherError for the REST outcomes, ValueError for an
+            # over-long identity — a dialog must never crash on either
+            util.DEBUG_LOG("Watch Together: join failed: {0}".format(
+                exc.__class__.__name__))
             util.showNotification(str(exc))
             return
         self.doClose()

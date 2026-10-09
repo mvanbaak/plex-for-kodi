@@ -153,12 +153,15 @@ class SnapshotTest(BridgeTestCase):
                          [{"position": 12, "paused": True, "doSeek": False}])
 
     def test_theme_music_never_reaches_the_relay(self):
-        # BGM plays through the same player: audio-only must not push state,
-        # or peers would seek their video to the theme's position
+        # BGM plays through the same player: audio-only must not push the
+        # theme's position, or peers would seek their video to it. We still
+        # emit an idle State so the relay does not reap the silent socket.
         self.bridge.supervisor = FakeSupervisor()
         self.player.video = False
+        self.player.position = 99.0
         self.bridge.push_local()
-        self.assertEqual(self.bridge.supervisor.sent, [])
+        self.assertEqual(self.bridge.supervisor.sent,
+                         [{"position": 0, "paused": True, "doSeek": False}])
 
     def test_no_supervisor_is_inert(self):
         self.bridge.push_local()
@@ -258,6 +261,16 @@ class LifecycleTest(BridgeTestCase):
         self.assertEqual(self.toasts, [util.T(35059, "The Watch Together room has ended")])
         self.assertEqual(util.getSetting("watchtogether.last_room", ""), "")
 
+    def test_gone_after_a_voluntary_leave_does_not_toast(self):
+        # our own DELETE makes the next room poll read NotMember; that is our
+        # departure, not "the room ended"
+        self.bridge.api = FakeAPI()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.leave()
+        self.bridge.on_gone()
+        self.assertEqual(self.toasts, [])
+
     def test_leave_releases_the_join_lock_before_blocking_calls(self):
         # api.leave() can block 15s and sup.stop() joins the supervisor thread;
         # holding _join_lock across either stalls a concurrent on_gone()/join().
@@ -322,6 +335,16 @@ class LobbyTest(BridgeTestCase):
         self.assertEqual(len(self.toasts), 1)
         self.assertIn("Other room", self.toasts[0])
         self.bridge._poll_rooms()        # same rooms again: no repeat toast
+        self.assertEqual(len(self.toasts), 1)
+
+    def test_departed_room_is_pruned_then_toasts_again(self):
+        self.bridge.api = FakeAPI(rooms=[ROOM_JSON])
+        self.bridge._poll_rooms()                 # seed silently
+        self.bridge.api = FakeAPI(rooms=[])
+        self.bridge._poll_rooms()                 # room gone -> pruned
+        self.assertEqual(self.bridge._seen_rooms, set())
+        self.bridge.api = FakeAPI(rooms=[ROOM_JSON])
+        self.bridge._poll_rooms()                 # back -> toast again
         self.assertEqual(len(self.toasts), 1)
 
     def test_poll_failure_is_swallowed(self):

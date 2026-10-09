@@ -293,13 +293,24 @@ class SessionSupervisorTest(unittest.TestCase):
         sup = self.make()
         sup.start()
         client = self.open_client()
-        before = len(client.sent)
         self.assertTrue(sup.outbound_state(
             {"position": 42, "paused": False, "doSeek": False}))
-        self.assertTrue(wait_for(lambda: len(client.sent) > before))
+        # the supervisor's 1 Hz loop is the single sender (§5.5)
+        self.assertTrue(wait_for(lambda: any(
+            m["State"]["playstate"]["position"] == 42 for m in client.states())))
         state = client.states()[-1]
-        self.assertEqual(state["State"]["playstate"]["position"], 42)
         self.assertEqual(state["State"]["playstate"]["paused"], False)
+
+    def test_heartbeat_sends_a_lobby_state_without_a_bridge_feed(self):
+        # §5.8: a joined-but-not-playing client must still emit State, or the
+        # relay reaps the silent socket in ~13 s
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        self.assertTrue(wait_for(lambda: client.states()), "no State was ever sent")
+        state = client.states()[0]["State"]["playstate"]
+        self.assertEqual(state["position"], 0)
+        self.assertTrue(state["paused"])
 
     def test_outbound_state_after_drop_is_inert(self):
         sup = self.make()

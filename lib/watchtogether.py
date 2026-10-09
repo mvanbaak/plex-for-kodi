@@ -134,11 +134,12 @@ class RoomsApi(object):
 BACKOFF = (1.0, 2.0, 4.0, 8.0, 30.0)
 TICK = 0.1
 POLL = 15.0
+HEARTBEAT = 1.0   # §5.5: one State per second, the relay's liveness gate
 
 
 class SessionSupervisor(object):
     def __init__(self, room, identity, token, ws_factory, transport=None,
-                 clock=None, abort=None, timer_factory=None, log=None):
+                 clock=None, abort=None, log=None):
         from . import syncplay
         self.room = room
         self.identity = identity
@@ -160,7 +161,6 @@ class SessionSupervisor(object):
             def abort():
                 return False
         self.abort = abort
-        self.timer_factory = timer_factory
         if log is None:
             def log(msg):
                 pass
@@ -179,7 +179,6 @@ class SessionSupervisor(object):
         self._stop = threading.Event()
         self._thread = None
         self._client = None
-        self._heartbeat = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -201,35 +200,21 @@ class SessionSupervisor(object):
                 client.close()
             except Exception:
                 pass
-        self._stop_heartbeat()
-        hb = self._heartbeat
-        if hb:
-            try:
-                hb.cancel()
-            except Exception:
-                pass
         thread = self._thread
         if thread and thread is not threading.current_thread():
             thread.join(timeout)
         self._thread = None
         self._client = None
-        self._heartbeat = None
 
     def _stopping(self):
         return self._stop.is_set() or self.abort()
 
     def outbound_state(self, local):
+        """Store the latest local snapshot. The 1 Hz loop on the supervisor
+        thread is the single State sender (§5.5) — sending here too, with a
+        bridge that also ticks at 1 Hz, would double the frame rate."""
         self._local = local
-        session = self.session
-        client = self._client
-        if session is None or client is None or not self.connected:
-            return False
-        try:
-            sent = self._send(session.outbound_state(local, self.clock.monotonic(), self.clock.time()))
-            return bool(sent)
-        except Exception as exc:
-            self.log("Watch Together: send failed ({0})".format(exc.__class__.__name__))
-            return False
+        return self.connected
 
     def _loop(self):
         started = False
@@ -282,7 +267,7 @@ class SessionSupervisor(object):
             self._mark_gone()
             return False
         except WatchTogetherError as exc:
-            self.log("Watch Together: room refresh failed ({0})".format(exc))
+            self.log("Watch Together: room refresh failed ({0})".format(exc.__class__.__name__))
             return True
         self.room = fresh
         if self.on_roster:
@@ -302,7 +287,6 @@ class SessionSupervisor(object):
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
             self._send(syncplay.set_ready(True))
-            self._start_heartbeat()
 
         def on_message(text):
             session = self.session
@@ -316,7 +300,6 @@ class SessionSupervisor(object):
             state["open"] = False
             state["closed"] = True
             self.connected = False
-            self._stop_heartbeat()
 
         from . import syncplay
         self.session = syncplay.Session(self.room.id, self.identity,
@@ -330,7 +313,6 @@ class SessionSupervisor(object):
             client.close()
         except Exception:
             pass
-        self._stop_heartbeat()
         self._client = None
         self.connected = False
         self.session = None
@@ -344,16 +326,37 @@ class SessionSupervisor(object):
     def _pump(self, client, state):
         client.start()
         last_poll = self.clock.monotonic()
+        last_state = self.clock.monotonic()
         while not self._stopping():
             if state["closed"]:
                 break
-            if state["open"] and self.clock.monotonic() - last_poll >= POLL:
-                last_poll = self.clock.monotonic()
+            now = self.clock.monotonic()
+            if state["open"] and now - last_poll >= POLL:
+                last_poll = now
                 if self._poll_room() is False:
                     break
+            # the supervisor is the single State sender: the bridge only
+            # stores the snapshot, this loop puts one frame on the wire per
+            # second (§5.5). A live-but-silent socket is reaped in ~13 s (§5.8).
+            if state["open"] and now - last_state >= HEARTBEAT:
+                last_state = now
+                self._send_state()
             if self._stop.wait(TICK):
                 break
         return state["ever"]
+
+    def _send_state(self):
+        session = self.session
+        if session is None:
+            return
+        # seed a lobby snapshot if the bridge has not fed one yet: an empty
+        # _local must never mean "send nothing" (that is the 13 s reap)
+        local = self._local or {"position": 0, "paused": True, "doSeek": False}
+        try:
+            self._send(session.outbound_state(local, self.clock.monotonic(),
+                                              self.clock.time()))
+        except Exception as exc:
+            self.log("Watch Together: state send failed ({0})".format(exc.__class__.__name__))
 
     def _send(self, obj):
         client = self._client
@@ -365,41 +368,3 @@ class SessionSupervisor(object):
         except Exception as exc:
             self.log("Watch Together: send failed ({0})".format(exc.__class__.__name__))
             return False
-
-    def _start_heartbeat(self):
-        self._stop_heartbeat()
-        if self.timer_factory is None:
-            try:
-                from plexnet.util import RepeatingCounterTimer
-                self._heartbeat = RepeatingCounterTimer(1.0, self._heartbeat_tick)
-            except Exception:
-                import threading
-                self._heartbeat = None
-        else:
-            try:
-                self._heartbeat = self.timer_factory(1.0, self._heartbeat_tick, repeat=True)
-            except Exception:
-                self._heartbeat = None
-
-    def _stop_heartbeat(self):
-        hb, self._heartbeat = self._heartbeat, None
-        if hb:
-            try:
-                hb.cancel()
-            except Exception:
-                pass
-
-    def _heartbeat_tick(self, tick=True):
-        if self._stopping() or not self.connected:
-            self._stop_heartbeat()
-            return
-        session = self.session
-        local = self._local
-        if session is None or local is None:
-            return
-        try:
-            self._send(session.outbound_state(local, self.clock.monotonic(),
-                                              self.clock.time()))
-        except Exception as exc:
-            self.log("Watch Together: heartbeat send failed ({0})".format(exc.__class__.__name__))
-            self._stop_heartbeat()
