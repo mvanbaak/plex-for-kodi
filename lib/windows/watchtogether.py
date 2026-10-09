@@ -12,7 +12,7 @@ from __future__ import absolute_import
 import threading
 import time
 
-from kodi_six import xbmc
+from kodi_six import xbmc, xbmcgui
 from plexnet import plexapp, plexobjects
 
 from lib import plex, player, syncplay, util, watchtogether, ws
@@ -36,6 +36,17 @@ def parse_source_uri(uri):
     if not rating_key:
         return None, None
     return machine, rating_key
+
+
+def needs_takeover_confirm(room, playing_key):
+    """True when joining would take over a *different* item already playing.
+
+    No prompt when nothing is playing, or when the playing item is provably
+    the room's own content; unknown room content prompts to be safe."""
+    if not playing_key:
+        return False
+    _, room_key = parse_source_uri(room.source_uri)
+    return not room_key or str(playing_key) != room_key
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):
@@ -93,6 +104,7 @@ class WatchTogetherBridge(object):
                         self._was_connected = sup.connected
                         self.update_status()
                     self.push_local()
+                    self._update_ready(sup)
             except Exception:
                 # never let one bad tick kill the lobby/heartbeat thread
                 util.ERROR()
@@ -172,6 +184,12 @@ class WatchTogetherBridge(object):
             "doSeek": False,
         })
 
+    def _update_ready(self, sup):
+        """§6.4: ready when video is loaded and not still buffering."""
+        ready = bool(player.PLAYER.isPlayingVideo()
+                     and not xbmc.getCondVisibility("Player.Caching"))
+        sup.set_ready(ready)
+
     def on_local_change(self, kind):
         """Kodi fired onPlayBack* for a local event (the gate let it through)."""
         util.DEBUG_LOG("Watch Together: local {0}, broadcasting state".format(kind))
@@ -179,6 +197,9 @@ class WatchTogetherBridge(object):
         if kind == "seek" and sup is not None:
             # §5.6: a local seek is a command, not just a position report
             sup.request_seek()
+        if kind == "play" and sup is not None:
+            # the user pressed play: that is a manual readiness (§6.4)
+            sup.set_ready(True, manually=True)
         self.push_local()
 
     # -- relay -> kodi ---------------------------------------------------------
@@ -199,6 +220,9 @@ class WatchTogetherBridge(object):
         session = sup.session
         if session is None or not sup.connected:
             return
+        # §6.3 foreground/background: v1 approximates "foreground" with "video
+        # playing" (no ad-break sync — an explicit v1 non-goal). The lobby and
+        # theme-music cases stay background and ignore the relay's playstate.
         if not player.PLAYER.isPlayingVideo():
             return
         local_pos = player.PLAYER.getTime() or 0.0
@@ -225,6 +249,10 @@ class WatchTogetherBridge(object):
             player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(action[1])
             applied = True
+        elif action and action[0] == "tempo":
+            # §6.2's gentle catch-up is deferred: v1 is hard-seek only (§9),
+            # so drift in the 1.5–4.0 s band waits for the 4.0 s seek bound
+            util.DEBUG_LOG("Watch Together: tempo catch-up deferred (v1 hard-seek)")
         if applied:
             util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
 
@@ -453,8 +481,24 @@ class RoomPickerDialog(kodigui.BaseDialog, util.CronReceiver):
         if controlID != self.LIST_ID:
             return
         mli = self.roomList.getSelectedItem()
-        if mli and mli.dataSource:
+        if mli and mli.dataSource and self._confirm_takeover(mli.dataSource):
             self.joinRoom(mli.dataSource.id)
+
+    def _playing_rating_key(self):
+        video = getattr(player.PLAYER, "video", None)
+        return str(getattr(video, "ratingKey", "") or "")
+
+    def _confirm_takeover(self, room):
+        """Joining seeks/pauses whatever is playing. If that is not the room's
+        own content, ask before taking over the user's playback (§6.4)."""
+        if not player.PLAYER.isPlayingVideo():
+            return True
+        if not needs_takeover_confirm(room, self._playing_rating_key()):
+            return True
+        return xbmcgui.Dialog().yesno(
+            util.T(35053, "Watch Together"),
+            util.T(35060, "You are already watching something else. "
+                          "Join and take over playback?"))
 
     @busy.dialog()
     def joinRoom(self, room_id):

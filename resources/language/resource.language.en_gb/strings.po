@@ -3396,3 +3396,7 @@ msgstr ""
 msgctxt "#35059"
 msgid "The Watch Together room has ended"
 msgstr ""
+
+msgctxt "#35060"
+msgid "You are already watching something else. Join and take over playback?"
+msgstr ""

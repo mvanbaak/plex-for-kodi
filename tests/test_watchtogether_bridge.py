@@ -52,6 +52,8 @@ class FakeSupervisor(object):
         self.sent = []
         self.stopped = False
         self.seek_requested = False
+        self.ready = None
+        self.ready_manual = None
 
     def outbound_state(self, local):
         self.sent.append(local)
@@ -59,6 +61,10 @@ class FakeSupervisor(object):
 
     def request_seek(self):
         self.seek_requested = True
+
+    def set_ready(self, ready, manually=False):
+        self.ready = ready
+        self.ready_manual = manually
 
     def stop(self, timeout=None):
         self.stopped = True
@@ -500,3 +506,44 @@ class SourceUriTest(KodiTestCase):
         self.assertEqual(wtwin.parse_source_uri("server://abc/other"), (None, None))
         self.assertEqual(wtwin.parse_source_uri(""), (None, None))
         self.assertEqual(wtwin.parse_source_uri(None), (None, None))
+
+
+class TakeoverConfirmTest(BridgeTestCase):
+    """Confirm before a join takes over a different item already playing."""
+
+    def room(self):
+        return watchtogether.Room(dict(
+            ROOM_JSON,
+            sourceUri="server://abc/com.plexapp.plugins.library/"
+                      "library/metadata/227117"))
+
+    def test_no_playing_key_no_prompt(self):
+        self.assertFalse(wtwin.needs_takeover_confirm(self.room(), ""))
+
+    def test_same_item_no_prompt(self):
+        self.assertFalse(wtwin.needs_takeover_confirm(self.room(), "227117"))
+
+    def test_different_item_prompts(self):
+        self.assertTrue(wtwin.needs_takeover_confirm(self.room(), "999"))
+
+    def test_unknown_room_content_prompts(self):
+        room = watchtogether.Room(dict(ROOM_JSON, sourceUri="not-a-uri"))
+        self.assertTrue(wtwin.needs_takeover_confirm(room, "999"))
+
+    def test_dialog_is_used_when_prompting(self):
+        dlg = wtwin.RoomPickerDialog.__new__(wtwin.RoomPickerDialog)
+        self.player.video = True
+        dlg._playing_rating_key = lambda: "999"
+        ENV.dialog_answers.clear()
+        ENV.dialog_answers.append(False)
+        self.assertFalse(dlg._confirm_takeover(self.room()))
+        self.assertEqual(ENV.dialog_calls[-1][0], "yesno")
+
+    def test_same_item_skips_the_dialog(self):
+        dlg = wtwin.RoomPickerDialog.__new__(wtwin.RoomPickerDialog)
+        self.player.video = True
+        dlg._playing_rating_key = lambda: "227117"
+        ENV.dialog_answers.clear()
+        ENV.dialog_calls.clear()
+        self.assertTrue(dlg._confirm_takeover(self.room()))
+        self.assertEqual(ENV.dialog_calls, [])

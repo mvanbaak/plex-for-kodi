@@ -282,7 +282,21 @@ class SessionSupervisorTest(unittest.TestCase):
         self.assertTrue(wait_for(lambda: len(client.sent) >= 3))
         self.assertEqual(client.sent[0], syncplay.hello(ROOM_JSON["id"], "me-identity"))
         self.assertEqual(client.sent[1], syncplay.list_request())
-        self.assertEqual(client.sent[2], syncplay.set_ready(True))
+        self.assertEqual(client.sent[2],
+                         syncplay.set_ready(False, manually_initiated=False))
+
+    def test_set_ready_is_sent_only_on_change(self):
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        self.assertTrue(wait_for(lambda: syncplay.set_ready(
+            False, manually_initiated=False) in client.sent))
+        before = len(client.sent)
+        sup.set_ready(False)                 # unchanged: nothing on the wire
+        self.assertEqual(len(client.sent), before)
+        sup.set_ready(True)
+        self.assertTrue(wait_for(lambda: syncplay.set_ready(
+            True, manually_initiated=False) in client.sent))
 
     def test_on_open_announces_the_rooms_file(self):
         # §5.8: state is per-connection — the file must be re-announced on
@@ -359,6 +373,20 @@ class SessionSupervisorTest(unittest.TestCase):
         # BACKOFF = (0.02, 0.04, 0.08): each gap is wider than the one before
         self.assertGreaterEqual(gaps[1], gaps[0] + 0.005)
         self.assertGreaterEqual(gaps[2], gaps[1] + 0.005)
+
+    def test_quick_drops_do_not_reset_the_backoff_ladder(self):
+        # a socket that opens then drops immediately is not "healthy": the
+        # ladder must keep escalating instead of hammering at the base delay
+        watchtogether.BACKOFF = (0.05, 0.1, 0.2, 0.4)
+        factory = FakeWSFactory()
+        self.make(factory=factory)
+        self.sup.start()
+        for n in range(4):
+            self.assertTrue(wait_for(lambda n=n: len(factory.clients) > n
+                                     and factory.clients[n].opened))
+            factory.clients[n].drop()
+        gaps = [b - a for a, b in zip(factory.times, factory.times[1:])]
+        self.assertGreaterEqual(gaps[2], gaps[0] + 0.005)
 
     def test_drop_fires_on_disconnected_then_redials(self):
         factory = FakeWSFactory()

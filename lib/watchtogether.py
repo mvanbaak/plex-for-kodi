@@ -136,6 +136,7 @@ BACKOFF = (1.0, 2.0, 4.0, 8.0, 30.0)
 TICK = 0.1
 POLL = 15.0
 HEARTBEAT = 1.0   # §5.5: one State per second, the relay's liveness gate
+STABLE = 10.0     # a connection up this long counts as healthy: reset backoff
 
 
 class SessionSupervisor(object):
@@ -189,6 +190,8 @@ class SessionSupervisor(object):
         self._inbox_lock = threading.Lock()
         self._inbox_event = threading.Event()
         self._seek_pending = False
+        self._ready = False         # §6.4 readiness; re-announced per connection
+        self._ready_sent = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -231,6 +234,17 @@ class SessionSupervisor(object):
         """Flag the next outbound State as a seek command (§5.6). The bridge
         calls this on a local seek; exactly one tick carries doSeek: true."""
         self._seek_pending = True
+
+    def set_ready(self, ready, manually=False):
+        """Report readiness, but only when it changes (§6.4). `manually` marks
+        a user-pressed play; automatic buffering reports False."""
+        ready = bool(ready)
+        if ready == self._ready_sent:
+            return
+        from . import syncplay
+        self._ready = ready
+        self._ready_sent = ready
+        self._send(syncplay.set_ready(ready, manually_initiated=manually))
 
     def _inbox_push(self, text):
         with self._inbox_lock:
@@ -319,17 +333,19 @@ class SessionSupervisor(object):
         return True
 
     def _attempt(self):
-        state = {"open": False, "ever": False, "closed": False}
+        state = {"open": False, "ever": False, "closed": False, "opened_at": None}
 
         def on_open():
             state["open"] = state["ever"] = True
+            state["opened_at"] = self.clock.monotonic()
             self.connected = True
             from . import syncplay
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
-            self._send(syncplay.set_ready(True))
-            # §5.8: state is per-connection — re-announce the file on every
-            # (re)connect, not just on the first join
+            # §5.8/§6.4: state is per-connection — re-announce readiness and
+            # the file on every (re)connect, not just the first join
+            self._ready_sent = None
+            self.set_ready(self._ready, manually=False)
             if self.room.source_uri:
                 self._send(syncplay.set_file(self.room.source_uri))
             self._start_heartbeat()
@@ -371,7 +387,11 @@ class SessionSupervisor(object):
                 self.on_disconnected()
             except Exception:
                 pass
-        return opened
+        # only a connection that stayed up counts as healthy: an accept-then-
+        # immediate-drop loop must escalate the backoff, not hammer at 1 s
+        stable = bool(state["ever"] and state["opened_at"] is not None
+                      and self.clock.monotonic() - state["opened_at"] >= STABLE)
+        return stable
 
     def _pump(self, client, state):
         client.start()
