@@ -100,18 +100,24 @@ def create(self, source_uri, title, users=None):   # POST /rooms -> Room (201)
 def invite(self, room_id, user_ids):               # POST /rooms/{id}/invite -> Room
 
 # lib/plexpeople.py
-def friends(token, fetch=None):                    # [{id, title, thumb}]
-def shared_users(token, machine_id, fetch=None):   # [{id, title}] (owner only)
+def friends(token, fetch=None):        # community GraphQL GetAllFriends
+                                       # -> [{id: idRaw, title: displayName, thumb: avatar}]
+def shared_users(token, machine_id, fetch=None):   # GET .../shared_servers (owner only)
+                                       # -> [{id: userID, title: username}]
 def eligible_invitees(token, item, owned, room_user_ids=(), fetch=None):
     # -> [Invitee(id, title, thumb, access_unknown)]
 ```
 
 ## Eligibility & invite picker
 
-- **Own server** (`item.server.owned`): home users + friends present on the
-  server's `shared_servers` list.
-- **Shared server**: all friends + home users; each row carries
-  `access_unknown` and the dialog labels it.
+- **Own server** (`item.server.owned`): home users + **friends who are also on
+  that server's `shared_servers` list** (intersect by `idRaw`/`userID`; drops
+  the sharee who is not a friend).
+- **Shared server**: **all friends + home users**; each row carries
+  `access_unknown` and the dialog labels it (can't verify server access).
+- Sources: friends via the community GraphQL `GetAllFriends`; home users via the
+  existing cached `homeUsers`; sharees via
+  `GET /api/servers/{machineId}/shared_servers`.
 - Self and existing room members are excluded.
 - Plain scroll list, avatar + name, multi-select, no search.
 - The same picker serves the lobby's **Invite (+)** and the room tile menu's
@@ -166,21 +172,35 @@ def eligible_invitees(token, item, owned, room_user_ids=(), fetch=None):
   → unpause.
 - Existing suites stay green.
 
-## Risks / unknowns (verify in planning, read-only)
+## Probe findings (resolved during planning, read-only)
 
-1. **plex.tv friends endpoint/shape** — `/api/v2/friends` (JSON) vs the legacy
-   XML `/api/users/{id}/friends`. Confirm against the live token with a
-   read-only probe; do not log any response that could carry a token.
-2. **Id matching** — that a friend's id equals the id used by
-   `shared_servers` and by `invite {users:[id]}`.
-3. **Non-friend sharee gate** — whether a server-sharee who is not a friend
-   passes the invite gate (§11.9 only proved an unrelated stranger is refused).
-   If not, eligibility must intersect sharees with friends.
-4. **Host opens paused** — the video window's `play()` blocks, so the pause must
-   be applied from the bridge/supervisor side once playback starts (the thread
-   the guest's remote-apply already uses), or a start-paused option added to the
-   play chain.
-5. **Guest lobby heuristic** — paused-at-0 detection (above).
+1. **Friends source.** The plex.tv friends endpoints are gone
+   (`/api/v2/friends`, `/api/friends`, `/api/users/{id}/friends`,
+   `clients.plex.tv/api/v2/friends` → 410/404). Friends come from the community
+   GraphQL API: `POST https://community.plex.tv/api` with
+   `{"query":"query GetAllFriends { allFriendsV2 { user { avatar displayName id
+   idRaw username } createdAt } }","operationName":"GetAllFriends"}` and header
+   `x-plex-token`. Returns `allFriendsV2[].user`.
+2. **Id matching.** `user.idRaw` is the numeric id; it matches
+   `shared_servers.userID` (18 of 19 sharees in the probe). `user.id` does
+   **not** match (0). Use `idRaw` for `invite {users:[idRaw]}`.
+3. **Non-friend sharee.** 1 of the 19 own-server sharees is not a friend, so for
+   own servers eligibility must intersect friends with sharees (already the
+   design). Whether that sharee passes the invite gate is untested — no live
+   invite was sent.
+4. **Own vs shared server.** `GET /api/servers/{machineId}/shared_servers` →
+   200 for owned servers (19 entries), **404 for shared servers** (owner-only),
+   confirming the shared-server "access unknown" fallback.
+
+## Remaining risks / unknowns
+
+- **Host opens paused** — the video window's `play()` blocks, so the pause must
+  be applied from the bridge/supervisor side once playback starts (the thread
+  the guest's remote-apply already uses), or a start-paused option added to the
+  play chain.
+- **Guest lobby heuristic** — paused-below-1 s detection (above).
+- **Community GraphQL stability** — undocumented private API; wrap it so a
+  failure degrades to home users only.
 
 ## Open items (resolve in writing-plans)
 
