@@ -16,7 +16,7 @@ import time
 from kodi_six import xbmc, xbmcgui
 from plexnet import plexapp, plexlibrary, plexobjects
 
-from lib import plex, player, syncplay, util, watchtogether, ws
+from lib import plex, plexpeople, player, syncplay, util, watchtogether, ws
 from . import busy, kodigui
 
 
@@ -420,6 +420,94 @@ class WatchTogetherBridge(object):
         if sup is not None:
             sup.send_now()
         self._started = True
+
+    # -- host flow -----------------------------------------------------------
+
+    def host(self, item):
+        """Start hosting `item`: create the room, join it, open the item paused
+        and show the lobby. Main thread; the opened item's window blocks here
+        until playback ends (like _watch_room)."""
+        rating_key = getattr(item, "ratingKey", None)
+        if not rating_key:
+            util.DEBUG_LOG("Watch Together: cannot host an item with no ratingKey")
+            return
+        machine_id = getattr(item.server, "uuid", None)
+        source_uri = ("server://{0}/com.plexapp.plugins.library/library/metadata/{1}"
+                      .format(machine_id, rating_key))
+        self._ensure_people_identity()
+        try:
+            room = self.ensure_api().create(source_uri, item.title)
+        except watchtogether.WatchTogetherError as exc:
+            # class name only: the message may carry a service URL (§7)
+            util.DEBUG_LOG("Watch Together: create failed: {0}".format(
+                exc.__class__.__name__))
+            util.showNotification(str(exc))
+            return
+        self.join(room.id)
+        # the lobby goes first: the video window's play() blocks, so anything
+        # after _open_paused never runs until playback ends
+        self._open_lobby()
+        self._open_paused(item)
+
+    def _ensure_people_identity(self):
+        """plexpeople is Kodi-free, so inject our client identifier/version
+        before any plex.tv community call (the invite picker, §Eligibility)."""
+        plexpeople.CLIENT_ID = plex.CLIENT_ID
+        plexpeople.VERSION = util.ADDON.getAddonInfo("version")
+
+    def _open_lobby(self):
+        """Show the host lobby over the video. Placeholder: Task 8 opens
+        LobbyDialog(host=True) and stores it on self.lobby."""
+        self.lobby = None
+
+    def _close_lobby(self):
+        lobby, self.lobby = self.lobby, None
+        close = getattr(lobby, "doClose", None)
+        if close is not None:
+            close()
+
+    def _open_paused(self, item):
+        """Open the host's item so it lands paused once AV starts.
+
+        videoplayer.play() blocks, so the pause cannot be applied after it
+        returns. Arm the player's existing start-paused hook instead
+        (pauseAfterPlaybackStarted, applied on AVStarted)."""
+        pl = _player()
+        if pl is not None:
+            pl.pauseAfterPlaybackStarted = True
+        try:
+            self._play_item(item)
+        except Exception:
+            util.ERROR()
+        finally:
+            if self.supervisor is not None:
+                self.disconnect()
+
+    def _play_item(self, item):
+        from . import videoplayer
+        videoplayer.play(video=item)
+
+    def invite(self, user_ids):
+        """Invite each id into the current room; return the ids that failed.
+
+        One request per id: the server's relationship gate (§11.9) rejects the
+        whole request when any target is refused, so batching would lose the
+        ones that could have been invited."""
+        room = self.room
+        if room is None:
+            return list(user_ids)
+        failed = []
+        for user_id in user_ids:
+            try:
+                self.ensure_api().invite(room.id, [user_id])
+            except watchtogether.WatchTogetherError:
+                failed.append(user_id)
+        return failed
+
+    def cancel_hosting(self):
+        """Cancel hosting: leave the room (DELETE) and close the lobby."""
+        self.leave()
+        self._close_lobby()
 
     def on_local_change(self, kind):
         """Kodi fired onPlayBack* for a local event (the gate let it through)."""

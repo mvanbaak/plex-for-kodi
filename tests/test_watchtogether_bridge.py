@@ -104,6 +104,7 @@ class FakePlayer(object):
         self.handler = FakeHandler()
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+        self.pauseAfterPlaybackStarted = False
 
     def playVideo(self, video, resume=False):
         self.videos.append((video, resume))
@@ -134,6 +135,10 @@ class FakeAPI(object):
         self.rooms_out = rooms if rooms is not None else []
         self.room_out = room
         self.calls = []
+        self.created = []
+        self.leaves = []
+        self.invites = []
+        self.invite_result = None
 
     def rooms(self):
         self.calls.append("rooms")
@@ -145,6 +150,41 @@ class FakeAPI(object):
 
     def leave(self, room_id):
         self.calls.append(("leave", room_id))
+        self.leaves.append(room_id)
+
+    def create(self, source_uri, title, users=None):
+        self.created.append({"sourceUri": source_uri, "title": title,
+                             "users": users})
+        return watchtogether.Room(self.room_out)
+
+    def invite(self, room_id, user_ids):
+        self.invites.append((room_id, list(user_ids)))
+        if self.invite_result is not None:
+            raise self.invite_result
+        return watchtogether.Room(self.room_out)
+
+
+class FakeServer(object):
+    def __init__(self, uuid):
+        self.uuid = uuid
+
+
+class FakeItem(object):
+    """Minimal PlexObject surface the host flow reads: server.uuid, ratingKey,
+    title."""
+
+    def __init__(self, machine="m", rating_key="1", title="T"):
+        self.server = FakeServer(machine) if machine is not None else None
+        self.ratingKey = rating_key
+        self.title = title
+
+
+class FakeLobby(object):
+    def __init__(self):
+        self.closed = False
+
+    def doClose(self):
+        self.closed = True
 
 
 class BridgeTestCase(KodiTestCase):
@@ -324,6 +364,95 @@ class AutoStartTest(BridgeTestCase):
         self.bridge.lobby = lobby
         self.fire_ready({})
         self.assertEqual(lobby.refreshed, 1)
+
+
+class HostFlowTest(BridgeTestCase):
+    """host / invite / start / cancel — the host capability (§Flows/Host)."""
+
+    def setUp(self):
+        super(HostFlowTest, self).setUp()
+        self.api = FakeAPI()
+        self.bridge.api = self.api
+        self.joined = []
+        self.opened = []
+        # host() joins via the real (network/socket) join and opens the real
+        # video window; both are stubbed here to keep the test offline.
+        self.bridge.join = self._fake_join
+        self.bridge._play_item = self.opened.append
+
+    def _fake_join(self, room_id):
+        self.joined.append(room_id)
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+
+    def test_host_creates_room_with_item_source_uri(self):
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(len(self.api.created), 1)
+        created = self.api.created[0]
+        self.assertEqual(
+            created["sourceUri"],
+            "server://m/com.plexapp.plugins.library/library/metadata/1")
+        self.assertEqual(created["title"], "T")
+
+    def test_host_opens_item_paused(self):
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertTrue(self.player.pauseAfterPlaybackStarted,
+                        "the start-paused hook must be armed before play()")
+        self.assertEqual(len(self.opened), 1, "the item must be opened")
+
+    def test_host_joins_the_created_room(self):
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(self.joined, ["ca8cfezmke4"])
+
+    def test_host_skips_without_a_rating_key(self):
+        self.bridge.host(FakeItem(machine="m", rating_key=None, title="T"))
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.joined, [])
+        self.assertEqual(self.opened, [])
+
+    def test_host_sets_the_people_client_id(self):
+        from lib import plex, plexpeople
+        saved = plexpeople.CLIENT_ID
+        plexpeople.CLIENT_ID = ""
+        try:
+            self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+            self.assertEqual(plexpeople.CLIENT_ID, plex.CLIENT_ID)
+            self.assertTrue(plexpeople.VERSION)
+        finally:
+            plexpeople.CLIENT_ID = saved
+
+    def test_invite_reports_failed_targets(self):
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.api.invite_result = watchtogether.WatchTogetherError("400")
+        self.assertEqual(self.bridge.invite([1]), [1])
+
+    def test_invite_keeps_the_room_and_invites_the_rest(self):
+        # §11.9: a refused target must not block the others
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.assertEqual(self.bridge.invite([1, 2]), [])
+        self.assertEqual(self.api.invites,
+                         [("ca8cfezmke4", [1]), ("ca8cfezmke4", [2])])
+
+    def test_invite_without_a_room_fails_every_id(self):
+        self.assertEqual(self.bridge.invite([1, 2]), [1, 2])
+
+    def test_start_unpauses(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+
+    def test_cancel_leaves_without_destroying(self):
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+
+        self.bridge.cancel_hosting()
+
+        self.assertEqual(self.api.leaves, ["ca8cfezmke4"])
+        self.assertEqual(self.api.calls, [("leave", "ca8cfezmke4")],
+                         "cancel must DELETE (leave), never destroy")
+        self.assertTrue(lobby.closed)
+        self.assertIsNone(self.bridge.lobby)
 
 
 class RemoteApplyTest(BridgeTestCase):
