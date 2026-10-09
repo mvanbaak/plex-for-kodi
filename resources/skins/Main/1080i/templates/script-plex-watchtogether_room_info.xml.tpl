@@ -38,21 +38,34 @@
         <colordiffuse>D3111111</colordiffuse>
     </control>
     <control type="label">
-        <posx>0</posx>
+        <posx>20</posx>
         <posy>0</posy>
-        <width>600</width>
+        <width>560</width>
         <height>{{ vscale(80) }}</height>
         <font>font12</font>
-        <align>center</align>
+        <align>left</align>
         <aligny>center</aligny>
         <textcolor>FFFFFFFF</textcolor>
-        <label>[B][UPPERCASE]$ADDON[script.plexmod 35053][/UPPERCASE][/B]</label>
+        <label>[B][UPPERCASE]$INFO[Window.Property(heading)][/UPPERCASE][/B]</label>
+    </control>
+    <control type="label">
+        <posx>20</posx>
+        <posy>{{ vscale(80) }}</posy>
+        <width>560</width>
+        <height>{{ vscale(50) }}</height>
+        <font>font10</font>
+        <align>left</align>
+        <aligny>center</aligny>
+        <textcolor>FFBBBBBB</textcolor>
+        <scroll>true</scroll>
+        <scrollspeed>15</scrollspeed>
+        <label>$ADDON[script.plexmod 35066]: $INFO[Window.Property(watching)]</label>
     </control>
     <control type="list" id="100">
         <posx>0</posx>
-        <posy>{{ vscale(80) }}</posy>
+        <posy>{{ vscale(130) }}</posy>
         <width>600</width>
-        <height>{{ vscale(462) }}</height>
+        <height>{{ vscale(412) }}</height>
         <scrolltime>200</scrolltime>
         <orientation>vertical</orientation>
         <itemlayout height="{{ vscale(100) }}">
@@ -190,21 +203,6 @@
             <textcolor>FF000000</textcolor>
             <focusedcolor>FF000000</focusedcolor>
             <label>$ADDON[script.plexmod 35069]</label>
-        </control>
-        <control type="button" id="61">
-            <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
-            <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
-            <posx>0</posx>
-            <posy>0</posy>
-            <width min="180">auto</width>
-            <height>{{ vscale(90) }}</height>
-            <font>font10</font>
-            <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
-            <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
-            <textoffsetx>70</textoffsetx>
-            <textcolor>FF000000</textcolor>
-            <focusedcolor>FF000000</focusedcolor>
-            <label>$ADDON[script.plexmod 35056]</label>
         </control>
     </control>
 </control>

@@ -9,6 +9,7 @@ The protocol itself lives in lib/watchtogether.py + lib/syncplay.py + lib/ws.py.
 
 from __future__ import absolute_import
 
+import json
 import threading
 import time
 
@@ -63,6 +64,25 @@ def _player():
     """The live PlexPlayer, or None during addon shutdown (player.PLAYER is
     deleted by player.shutdown() while daemon threads may still tick)."""
     return getattr(player, "PLAYER", None)
+
+
+def room_info_rows(room, live_ids):
+    """One row per room user for the info dialog, marking who is connected.
+    `live_ids` are the userIDs seen on the relay roster (only known while
+    connected to that room)."""
+    rows = []
+    for user in (room.participants if room else []):
+        if not isinstance(user, dict):
+            continue
+        name = user.get("title") or user.get("username") or ""
+        is_live = str(user.get("id")) in live_ids
+        rows.append({
+            "name": name,
+            "sub": util.T(35068, "Live") if is_live else (user.get("username") or ""),
+            "thumb": user.get("thumb") or "",
+            "live": is_live,
+        })
+    return rows
 
 
 class WatchTogetherRoomItem(object):
@@ -146,6 +166,17 @@ def confirm_switch():
     return xbmcgui.Dialog().yesno(
         util.T(35053, "Watch Together"),
         util.T(35061, "Leave the current room and join this one?"))
+
+
+def confirm_leave():
+    """Confirm leaving the room (used by the OSD menu and the dialog)."""
+    from . import optionsdialog
+    button = optionsdialog.show(
+        util.T(35056, "Leave room"),
+        util.T(35070, "Leave this Watch Together room?"),
+        util.T(32328, "Yes"),
+        util.T(32329, "No"))
+    return button == 0
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):
@@ -511,6 +542,7 @@ class WatchTogetherBridge(object):
                 return
             if sup is not None and current is not sup:
                 return
+            util.DEBUG_LOG("Watch Together: room gone (ended / removed / dead token)")
             self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
@@ -600,6 +632,7 @@ class WatchTogetherBridge(object):
         """End the session without DELETE: closing the socket tells peers we
         left (§5.8) but the room keeps us, so the tile can rejoin. Contrast
         leave(), which is the explicit 'leave the room' (DELETE)."""
+        util.DEBUG_LOG("Watch Together: disconnect (session end, keeps membership)")
         with self._join_lock:
             sup, self.supervisor = self.supervisor, None
             self.room = None
@@ -608,6 +641,7 @@ class WatchTogetherBridge(object):
             sup.stop()
 
     def leave(self):
+        util.DEBUG_LOG("Watch Together: leave (DELETE, drops membership)")
         # Detach + reset under the lock, then do the blocking REST call and
         # thread join outside it: holding _join_lock across api.leave() (up to
         # 15s) and sup.stop() (joins the supervisor) would stall a concurrent
@@ -626,6 +660,41 @@ class WatchTogetherBridge(object):
                     exc.__class__.__name__))
         if sup:
             sup.stop()
+
+    def remove_room(self, room):
+        """Remove me from this room (DELETE). If I was the last member the room
+        ends up empty on the server and stops being listed for anyone."""
+        room_id = room.id
+        if self.supervisor is not None and self.room is not None and self.room.id == room_id:
+            self.leave()
+            return
+        try:
+            self.ensure_api().leave(room_id)
+        except watchtogether.WatchTogetherError as exc:
+            util.DEBUG_LOG("Watch Together: remove failed: {0}".format(
+                exc.__class__.__name__))
+        self._drop_room(room_id)
+
+    def _drop_room(self, room_id):
+        before = len(self.rooms_cache)
+        self.rooms_cache = [r for r in self.rooms_cache if r.id != room_id]
+        self.room_art.pop(room_id, None)
+        if len(self.rooms_cache) != before:
+            self.rooms_version += 1
+
+    def _live_user_ids(self):
+        """userIDs currently on the relay roster (only known for the room we
+        are connected to)."""
+        sup = self.supervisor
+        if sup is None or sup.session is None:
+            return set()
+        ids = set()
+        for key in list(sup.session.roster):
+            try:
+                ids.add(str(json.loads(syncplay.strip_identity(key)).get("userID")))
+            except (ValueError, TypeError, AttributeError):
+                pass
+        return ids
 
     def room_clicked(self, room):
         """Hub tile click: join and watch, switch, or (already watching) open
@@ -707,6 +776,7 @@ class WatchTogetherBridge(object):
             text = util.T(35054, "{} watching").format(count)
         # base='{0}': the skin reads Window(10000).Property(watchtogether.status)
         util.setGlobalProperty("watchtogether.status", text, base="{0}")
+        util.DEBUG_LOG("Watch Together: status -> {0!r}".format(text))
 
 
 bridge = WatchTogetherBridge()
@@ -724,7 +794,8 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     height = 1080
 
     LIST_ID = 100
-    LEAVE_ID = 60
+    CLOSE_ID = 60
+    LEAVE_ID = 61
 
     def onFirstInit(self):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
@@ -732,9 +803,9 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
         self._ticks = 0
         bridge.refresh_room()
         self._sync()
-        # the roster can be empty; focus the Leave button so the dialog is
-        # never a dead end
-        self.setFocusId(self.LEAVE_ID)
+        # focus Close (not Leave): OK must dismiss the popup, leaving must be
+        # a deliberate second choice
+        self.setFocusId(self.CLOSE_ID)
         util.CRON.registerReceiver(self)
 
     def onClosed(self):
@@ -752,6 +823,8 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     def _sync(self):
         room = bridge.room
         participants = room.participants if room else []
+        util.DEBUG_LOG("Watch Together: participants dialog roster: {0} ({1})".format(
+            len(participants), "room set" if room else "room None"))
         key = tuple(sorted(str(u.get('id')) for u in participants))
         if key == self._key:
             return
@@ -759,15 +832,82 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
         items = [kodigui.ManagedListItem(
             u.get('title') or u.get('username') or '',
             u.get('username') or '',
+            thumbnailImage=u.get('thumb') or '',
             data_source=u) for u in participants]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
     def onClick(self, controlID):
-        if controlID == self.LEAVE_ID:
+        if controlID == self.CLOSE_ID:
+            self.doClose()
+        elif controlID == self.LEAVE_ID and confirm_leave():
             self.leaveRoom()
 
     @busy.dialog()
     def leaveRoom(self):
         bridge.leave()
         self.doClose()
+
+
+class RoomInfoDialog(kodigui.BaseDialog):
+    """Read-only room info: the media and the participants, with a live marker
+    for those currently connected (known only for the room we are in)."""
+
+    xmlFile = 'script-plex-watchtogether_room_info.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    CLOSE_ID = 60
+
+    def __init__(self, *args, **kwargs):
+        kodigui.BaseDialog.__init__(self, *args, **kwargs)
+        self.room = kwargs.get('room')
+        self.item = kwargs.get('item')
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        room = self.room
+        self.setProperty('heading', room.title if room else '')
+        self.setProperty('watching', self.item.title if self.item else '')
+        self._sync()
+        self.setFocusId(self.CLOSE_ID)
+
+    def _sync(self):
+        live = bridge._live_user_ids()
+        items = [kodigui.ManagedListItem(row['name'], row['sub'],
+                                         thumbnailImage=row['thumb'],
+                                         data_source=self.room)
+                 for row in room_info_rows(self.room, live)]
+        self.peopleList.reset()
+        self.peopleList.addItems(items)
+
+    def onClick(self, controlID):
+        if controlID == self.CLOSE_ID:
+            self.doClose()
+
+
+def show_room_info(room):
+    """Open the room info dialog (resolves the media item best-effort)."""
+    bridge.start()
+    item = bridge._room_media_item(room)
+    window = RoomInfoDialog.open(room=room, item=item)
+    del window
+    util.garbageCollect()
+
+
+def show_participants():
+    """Open the participants/leave dialog (used from the video OSD)."""
+    bridge.start()
+    window = ParticipantsDialog.open()
+    del window
+    util.garbageCollect()
+
+
+@busy.dialog()
+def leave_room():
+    """Leave the current room (used from the video OSD)."""
+    bridge.leave()

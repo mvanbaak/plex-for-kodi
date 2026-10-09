@@ -3350,6 +3350,42 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.showHubs(self.lastSection, force=True, update=True)
             return
 
+    def _watchtogether_hub_menu(self, room):
+        from . import watchtogether as wtwin
+        choice = dropdown.showDropdown(
+            [{'key': 'wt_join', 'display': T(35062, 'Join')},
+             {'key': 'wt_remove', 'display': T(35063, 'Remove')},
+             {'key': 'wt_info', 'display': T(35064, 'Info')}],
+            pos=(660, 441),
+            close_direction='none',
+            set_dropdown_prop=False,
+            header=T(33030, 'Choose action for: {}').format(room.title),
+            select_index=0,
+            align_items='left',
+            dialog_props=self.carriedProps
+        )
+        if not choice:
+            return
+        if choice['key'] == 'wt_join':
+            command = wtwin.bridge.room_clicked(room)
+            if command:
+                self.processCommand(command)
+        elif choice['key'] == 'wt_remove':
+            if self._confirm_remove_room(room):
+                wtwin.bridge.remove_room(room)
+        elif choice['key'] == 'wt_info':
+            wtwin.show_room_info(room)
+
+    def _confirm_remove_room(self, room):
+        button = optionsdialog.show(
+            T(35063, 'Remove'),
+            T(35065, 'Remove me from this room?'),
+            T(32328, 'Yes'),
+            T(32329, 'No'),
+            dialog_props=self.carriedProps
+        )
+        return button == 0
+
     def hubMenu(self, hubControlID):
         hub = self.currentHub
         if not hub:
@@ -3366,8 +3402,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         ds = mli.dataSource
 
         if self._isWatchTogetherItem(ds):
-            # a room tile has no media context menu (watch/mark/visit)
-            return
+            return self._watchtogether_hub_menu(ds.room)
 
         # Determine the hub's source section and catalog_id
         is_home = not self.lastSection or self.lastSection.key is None
