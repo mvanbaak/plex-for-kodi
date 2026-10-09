@@ -116,6 +116,18 @@
             <textcolor>FFFFFFFF</textcolor>
             <label>$INFO[System.Time]</label>
         </control>
+        <control type="label">
+            <visible>!String.IsEmpty(Window(10000).Property(watchtogether.status))</visible>
+            <posx>460</posx>
+            <posy>{{ vscale(60) }}</posy>
+            <width>1000</width>
+            <height>{{ vscale(40) }}</height>
+            <font>font10</font>
+            <align>center</align>
+            <aligny>center</aligny>
+            <textcolor>FFE5A00D</textcolor>
+            <label>$INFO[Window(10000).Property(watchtogether.status)]</label>
+        </control>
     </control>
 
     <control type="group">
