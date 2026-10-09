@@ -610,6 +610,51 @@ class HostFlowTest(BridgeTestCase):
         self.assertIsNone(self.bridge.lobby)
 
 
+class GuestLobbyTest(BridgeTestCase):
+    """The read-only lobby a guest sees while a joined room is unstarted.
+
+    Heuristic (§Guest lobby visibility): relay State paused with position < 1 s
+    means the room has not started; the lobby closes on the first state with
+    playback running."""
+
+    def setUp(self):
+        super(GuestLobbyTest, self).setUp()
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+
+    def state(self, position, paused):
+        return {"position": position, "paused": paused, "doSeek": False,
+                "setBy": "other-identity"}
+
+    def test_guest_shows_lobby_for_unstarted_room(self):
+        self.bridge.on_state(self.state(0.0, True))
+        self.assertIsNotNone(self.bridge.lobby, "an unstarted room shows the lobby")
+        self.assertIs(self.bridge.lobby.is_host, False,
+                      "a guest's lobby is read-only")
+
+    def test_guest_no_lobby_for_playing_room(self):
+        self.bridge.on_state(self.state(120.0, False))
+        self.assertIsNone(self.bridge.lobby)
+
+    def test_guest_closes_lobby_when_playback_starts(self):
+        self.bridge.on_state(self.state(0.0, True))
+        self.assertIsNotNone(self.bridge.lobby)
+        self.bridge.on_state(self.state(1.5, False))
+        self.assertIsNone(self.bridge.lobby, "playback started: close the lobby")
+
+    def test_guest_lobby_is_not_shown_to_the_host(self):
+        # the host owns its own lobby via host(); the heuristic must not fire
+        self.bridge._hosting = True
+        self.bridge.on_state(self.state(0.0, True))
+        self.assertIsNone(self.bridge.lobby)
+
+    def test_guest_lobby_closes_when_the_room_goes_away(self):
+        self.bridge.on_state(self.state(0.0, True))
+        self.assertIsNotNone(self.bridge.lobby)
+        self.bridge.on_gone()
+        self.assertIsNone(self.bridge.lobby, "room ended: no orphan lobby")
+
+
 class RemoteApplyTest(BridgeTestCase):
     def remote(self, position, paused):
         return {"position": position, "paused": paused, "doSeek": False,

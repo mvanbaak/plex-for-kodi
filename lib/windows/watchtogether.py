@@ -249,6 +249,7 @@ class WatchTogetherBridge(object):
         self._was_connected = False
         self._player_ready = False
         self._started = False
+        self._hosting = False   # host() owns its lobby; guests auto-open one
         self.lobby = None       # the open LobbyDialog, if any (Task 8)
 
     # -- startup ------------------------------------------------------------
@@ -467,6 +468,7 @@ class WatchTogetherBridge(object):
             # would orphan the room we just created and leave self.room stale
             self.leave()
         self.join(room.id)
+        self._hosting = True
         # the lobby goes first: the video window's play() blocks, so anything
         # after _open_paused never runs until playback ends
         self._open_lobby()
@@ -478,21 +480,36 @@ class WatchTogetherBridge(object):
         plexpeople.CLIENT_ID = plex.CLIENT_ID
         plexpeople.VERSION = util.ADDON.getAddonInfo("version")
 
-    def _open_lobby(self):
-        """Show the host lobby over the video. Non-modal (create, not open):
+    def _open_lobby(self, host=True):
+        """Show the lobby over the video. Non-modal (create, not open):
         videoplayer.play() blocks right after, so a modal dialog would
-        deadlock."""
+        deadlock. `host=False` is the guest's read-only variant (Task 11)."""
         sup = self.supervisor
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
         self.lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
-                                        live_ids=self._live_user_ids(), host=True)
+                                        live_ids=self._live_user_ids(), host=host)
 
     def _close_lobby(self):
         lobby, self.lobby = self.lobby, None
         close = getattr(lobby, "doClose", None)
         if close is not None:
             close()
+
+    def _update_guest_lobby(self, remote):
+        """Guest lobby visibility (§Guest lobby visibility): a guest sees the
+        read-only lobby while the joined room is unstarted — relay State paused
+        with position < 1 s — and it closes the moment playback starts. The
+        host owns its lobby via host(), so this is a no-op while hosting."""
+        if self._hosting:
+            return
+        unstarted = (remote.get("paused") is True
+                     and (remote.get("position") or 0) < 1)
+        if unstarted:
+            if self.lobby is None:
+                self._open_lobby(host=False)
+        elif self.lobby is not None:
+            self._close_lobby()
 
     def _open_paused(self, item):
         """Open the host's item so it lands paused once AV starts.
@@ -622,6 +639,7 @@ class WatchTogetherBridge(object):
         session = sup.session
         if session is None or not sup.connected:
             return
+        self._update_guest_lobby(remote)
         if time.monotonic() - self._local_change_at < LOCAL_CHANGE_GRACE:
             return          # our own change is in flight; don't be reverted
         pl = _player()
@@ -805,6 +823,7 @@ class WatchTogetherBridge(object):
             self.supervisor = sup
             self._was_connected = False
             self._started = False
+            self._hosting = False
             pl = _player()
             if pl is not None:
                 pl.wt_broadcast = self.on_local_change
@@ -962,6 +981,8 @@ class WatchTogetherBridge(object):
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
         self._started = False
+        self._hosting = False
+        self._close_lobby()     # session ended: no lobby may outlive it
         if forget_room:
             util.setSetting("watchtogether.last_room", "")
         self.update_status()
