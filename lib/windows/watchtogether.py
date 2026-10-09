@@ -415,9 +415,10 @@ class WatchTogetherBridge(object):
 
     def _maybe_auto_start(self):
         """Start the room once every user in room.users except self is on the
-        roster and ready, and self is ready (§6.4). A member who never joins
-        blocks it — the host presses Start instead."""
-        if self._started or not self._player_ready:
+        roster and ready, and self is ready (§6.4). Only the host drives the
+        room — a ready guest must never call start_playback(). A member who
+        never joins blocks it — the host presses Start instead."""
+        if not self._hosting or self._started or not self._player_ready:
             return
         sup = self.supervisor
         room = self.room
@@ -452,27 +453,62 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: cannot host an item with no ratingKey")
             return
         machine_id = getattr(item.server, "uuid", None)
+        if not machine_id:
+            # no machine -> sourceUri would be unresolvable: creating a room
+            # nobody can play is worse than not creating one
+            util.DEBUG_LOG("Watch Together: cannot host an item with no server uuid")
+            util.showNotification(util.T(35084, "This item cannot be hosted"))
+            return
         source_uri = ("server://{0}/com.plexapp.plugins.library/library/metadata/{1}"
                       .format(machine_id, rating_key))
         self._ensure_people_identity()
-        try:
-            room = self.ensure_api().create(source_uri, item.title)
-        except watchtogether.WatchTogetherError as exc:
-            # class name only: the message may carry a service URL (§7)
-            util.DEBUG_LOG("Watch Together: create failed: {0}".format(
-                exc.__class__.__name__))
-            util.showNotification(str(exc))
+        room = self._create_and_join(source_uri, item.title)
+        if room is None:
             return
-        if self.supervisor is not None:
-            # switch rooms: join() early-returns an existing supervisor, which
-            # would orphan the room we just created and leave self.room stale
-            self.leave()
-        self.join(room.id)
         self._hosting = True
         # the lobby goes first: the video window's play() blocks, so anything
         # after _open_paused never runs until playback ends
         self._open_lobby()
         self._open_paused(item)
+
+    @busy.dialog()
+    def _create_and_join(self, source_uri, title):
+        """Create the room and join it behind a busy spinner (each REST call
+        can block 15 s). Returns the room, or None on failure (already
+        toasted)."""
+        try:
+            room = self.ensure_api().create(source_uri, title)
+        except watchtogether.WatchTogetherError as exc:
+            self._host_failed(exc)
+            return None
+        try:
+            if self.supervisor is not None:
+                # switch rooms: join() early-returns an existing supervisor,
+                # which would orphan the room we just created and leave
+                # self.room stale
+                self.leave()
+            self.join(room.id)
+        except watchtogether.WatchTogetherError as exc:
+            # created but never joined: DELETE the orphan before reporting
+            self._host_failed(exc)
+            try:
+                self.ensure_api().leave(room.id)
+            except watchtogether.WatchTogetherError:
+                pass
+            return None
+        return room
+
+    def _host_failed(self, exc):
+        """Report a host create/join failure. Class name only in the log: the
+        message may carry a service URL (§7). A dead token gets the sign-in
+        hint the spec asks for (§4/Error handling)."""
+        util.DEBUG_LOG("Watch Together: host failed: {0}".format(
+            exc.__class__.__name__))
+        if isinstance(exc, watchtogether.AuthError):
+            util.showNotification(
+                util.T(35083, "Sign in again to use Watch Together"))
+        else:
+            util.showNotification(str(exc))
 
     def _ensure_people_identity(self):
         """plexpeople is Kodi-free, so inject our client identifier/version
@@ -535,31 +571,38 @@ class WatchTogetherBridge(object):
         from . import videoplayer
         videoplayer.play(video=item)
 
-    def invite(self, user_ids):
-        """Invite each id into the current room; return the ids that failed.
+    def invite(self, user_ids, room=None):
+        """Invite each id into `room` (default: the current room); return the
+        ids that failed.
 
         One request per id: the server's relationship gate (§11.9) rejects the
         whole request when any target is refused, so batching would lose the
-        ones that could have been invited."""
-        room = self.room
+        ones that could have been invited. A dead token is not a per-target
+        failure, so AuthError propagates for the caller to report."""
+        if room is None:
+            room = self.room
         if room is None:
             return list(user_ids)
         failed = []
         for user_id in user_ids:
             try:
                 self.ensure_api().invite(room.id, [user_id])
+            except watchtogether.AuthError:
+                raise
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
         return failed
 
-    def invitees(self):
-        """Eligible invitees for the current room (plexpeople.eligible_invitees).
+    def invitees(self, room=None):
+        """Eligible invitees for `room` (default: the current room)
+        (plexpeople.eligible_invitees).
 
         Home users plus friends; on a shared server every row is flagged
         access_unknown. Degrades to home users only when the friends lookup
         returns nothing (Review Focus 1) and never raises: the picker must
         open whatever plex.tv answers."""
-        room = self.room
+        if room is None:
+            room = self.room
         account = plexapp.ACCOUNT
         if room is None or account is None:
             return []
@@ -754,6 +797,11 @@ class WatchTogetherBridge(object):
     def on_roster(self, room):
         self.room = room
         self.update_status()
+        # membership changed (e.g. an invitee joined): repaint the open lobby
+        # so their Invited/Ready status shows without waiting for a ready change
+        refresh = getattr(self.lobby, "refresh", None)
+        if refresh is not None:
+            refresh()
 
     def on_disconnected(self):
         util.DEBUG_LOG("Watch Together: relay connection lost, reconnecting")
@@ -1180,8 +1228,9 @@ class LobbyDialog(kodigui.BaseDialog):
 
     def refresh(self):
         """Re-read the roster and repaint (called from the supervisor thread
-        on a peer's readiness change — never raise)."""
-        if not getattr(self, 'peopleList', None):
+        on a roster/readiness change — never raise). Membership comes from
+        bridge.room in _sync, so an invitee added by the 15 s poll appears."""
+        if getattr(self, 'peopleList', None) is None:
             return          # window not initialised yet: nothing to repaint
         sup = bridge.supervisor
         if sup is not None and sup.session is not None:
@@ -1190,10 +1239,13 @@ class LobbyDialog(kodigui.BaseDialog):
         self._sync()
 
     def _sync(self):
+        # the open lobby must follow the bridge's live room (on_roster replaces
+        # it every 15 s); self.room is only the fallback before the first poll
+        room = bridge.room or self.room
         items = [kodigui.ManagedListItem(row['title'], row['status'],
                                          thumbnailImage=row['thumb'],
-                                         data_source=self.room)
-                 for row in lobby_rows(self.room, self.roster, self.live_ids)]
+                                         data_source=room)
+                 for row in lobby_rows(room, self.roster, self.live_ids)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
@@ -1213,7 +1265,7 @@ class LobbyDialog(kodigui.BaseDialog):
         # not hard-depend on it landing first.
         invite_dialog = globals().get('InviteDialog')
         if invite_dialog is not None:
-            invite_dialog.open()
+            invite_dialog.open(room=self.room)
 
     def doClose(self, **kw):
         if bridge.lobby is self:
@@ -1239,6 +1291,11 @@ class InviteDialog(kodigui.BaseDialog):
     OK_ID = 60
     CANCEL_ID = 61
 
+    def __init__(self, *args, **kwargs):
+        kodigui.BaseDialog.__init__(self, *args, **kwargs)
+        # the room to invite into; None means "the bridge's current room"
+        self.room = kwargs.get('room')
+
     def onFirstInit(self):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
         self._invitees = []
@@ -1252,7 +1309,7 @@ class InviteDialog(kodigui.BaseDialog):
 
     def _fetch(self):
         try:
-            invitees = bridge.invitees()
+            invitees = bridge.invitees(self.room)
         except Exception:
             # never let a people lookup break the picker (Review Focus 1)
             util.ERROR()
@@ -1295,7 +1352,14 @@ class InviteDialog(kodigui.BaseDialog):
 
     @busy.dialog()
     def _send(self, ids):
-        if bridge.invite(ids):
+        try:
+            failed = bridge.invite(ids, self.room)
+        except watchtogether.AuthError:
+            # dead token: nothing was invited, ask the user to sign in again
+            util.showNotification(
+                util.T(35083, "Sign in again to use Watch Together"))
+            return
+        if failed:
             util.showNotification(
                 util.T(35079, "Some people could not be invited"))
 

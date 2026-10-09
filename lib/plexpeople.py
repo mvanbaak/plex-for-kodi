@@ -85,8 +85,14 @@ def friends(token, http=None):
     out = []
     for edge in edges:
         user = edge.get("user") if isinstance(edge, dict) else None
-        user_id = user.get("idRaw") if isinstance(user, dict) else None
-        if user_id is None:
+        raw = user.get("idRaw") if isinstance(user, dict) else None
+        if raw is None:
+            continue
+        try:
+            # coerce: a string idRaw would never match the int sharee ids, so
+            # the friends∩sharees intersection would silently empty
+            user_id = int(raw)
+        except (TypeError, ValueError):
             continue
         out.append({"id": user_id,
                     "title": user.get("displayName", ""),

@@ -182,6 +182,23 @@ class RoomsWriteTest(unittest.TestCase):
             api.invite("r1", ["NaN"])
         self.assertEqual(calls, [])          # never reaches the 500-leaking path
 
+    def test_invite_rejects_bool_ids(self):
+        # bool is an int subclass but serializes as true/false -> the same 500
+        api, calls = self.api_with(200, {"id": "r1"})
+        with self.assertRaises(ValueError):
+            api.invite("r1", [True])
+        self.assertEqual(calls, [])
+
+    def test_create_empty_body_is_error(self):
+        api, _ = self.api_with(201, None)
+        with self.assertRaises(watchtogether.WatchTogetherError):
+            api.create("server://x", "T")
+
+    def test_invite_empty_body_is_error(self):
+        api, _ = self.api_with(200, None)
+        with self.assertRaises(watchtogether.WatchTogetherError):
+            api.invite("r1", [1000002])
+
     def test_create_401_raises_auth_error(self):
         api, _ = self.api_with(401, None)
         with self.assertRaises(watchtogether.AuthError):

@@ -3484,3 +3484,11 @@ msgstr ""
 msgctxt "#35082"
 msgid "Invite…"
 msgstr ""
+
+msgctxt "#35083"
+msgid "Sign in again to use Watch Together"
+msgstr ""
+
+msgctxt "#35084"
+msgid "This item cannot be hosted"
+msgstr ""

@@ -338,6 +338,7 @@ class EntryMenuTest(KodiTestCase):
         self._saved_dropdown = home.dropdown.showDropdown
         self._saved_host = wtwin.bridge.host
         self._saved_supervisor = wtwin.bridge.supervisor
+        self._saved_room = wtwin.bridge.room
         self._saved_open = wtwin.InviteDialog.open
         self._saved_confirm = HomeWindow._confirm_start_watch_together
         # hubMenu reads cache_requests via util.getSetting; the harness has no
@@ -349,6 +350,7 @@ class EntryMenuTest(KodiTestCase):
         home.dropdown.showDropdown = self._saved_dropdown
         wtwin.bridge.host = self._saved_host
         wtwin.bridge.supervisor = self._saved_supervisor
+        wtwin.bridge.room = self._saved_room
         wtwin.InviteDialog.open = self._saved_open
         HomeWindow._confirm_start_watch_together = self._saved_confirm
         super(EntryMenuTest, self).tearDown()
@@ -388,9 +390,29 @@ class EntryMenuTest(KodiTestCase):
         opts = self.menu_options(ds=Movie(machine=None, rating_key=None))
         assert not any(o["key"] == "start_watch_together" for o in opts)
 
+    def test_start_watch_together_hidden_without_server_uuid(self):
+        # a server object without a uuid still yields an unresolvable sourceUri
+        ds = Movie(machine="m", rating_key="1")
+        ds.server = _Server(None)
+        opts = self.menu_options(ds=ds)
+        assert not any(o["key"] == "start_watch_together" for o in opts)
+
     def test_room_tile_menu_has_invite(self):
+        wtwin.bridge.room = self.room
         opts = self.room_menu()
         assert any(o["key"] == "invite" for o in opts)
+
+    def test_room_tile_menu_hides_invite_for_another_room(self):
+        # invite is scoped to the current room; do not offer it on other tiles
+        wtwin.bridge.room = watchtogether.Room({"id": "other", "title": "O",
+                                                "sourceUri": "", "users": []})
+        opts = self.room_menu()
+        assert not any(o["key"] == "invite" for o in opts)
+
+    def test_room_tile_menu_hides_invite_when_not_in_a_room(self):
+        wtwin.bridge.room = None
+        opts = self.room_menu()
+        assert not any(o["key"] == "invite" for o in opts)
 
     def test_start_calls_host_when_not_in_a_room(self):
         hosted = []
@@ -415,7 +437,8 @@ class EntryMenuTest(KodiTestCase):
         self.assertEqual(hosted, [ds])
 
     def test_invite_opens_the_dialog(self):
+        wtwin.bridge.room = self.room
         opened = []
-        wtwin.InviteDialog.open = lambda *a, **k: opened.append(True)
+        wtwin.InviteDialog.open = lambda *a, **k: opened.append(k.get("room"))
         self.room_menu(choice="invite")
-        self.assertEqual(opened, [True])
+        self.assertEqual(opened, [self.room])

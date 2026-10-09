@@ -50,6 +50,25 @@ def test_friends_skips_entries_without_idraw():
     assert out == [{"id": 7, "title": "ok", "thumb": ""}]
 
 
+def test_friends_coerces_string_idraw_to_int():
+    # a string idRaw would never match the int sharee ids, silently emptying
+    # the friends∩sharees intersection
+    body = json.dumps({"data": {"allFriendsV2": [
+        {"user": {"idRaw": "1000002", "displayName": "P", "avatar": ""}},
+    ]}}).encode()
+    out = plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", body))
+    assert out == [{"id": 1000002, "title": "P", "thumb": ""}]
+
+
+def test_friends_skips_non_numeric_idraw():
+    body = json.dumps({"data": {"allFriendsV2": [
+        {"user": {"idRaw": "abc", "displayName": "bad"}},
+        {"user": {"idRaw": 7, "displayName": "ok"}},
+    ]}}).encode()
+    out = plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", body))
+    assert out == [{"id": 7, "title": "ok", "thumb": ""}]
+
+
 def test_friends_degrades_on_bad_json():
     assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", b"<html>")) == []
 

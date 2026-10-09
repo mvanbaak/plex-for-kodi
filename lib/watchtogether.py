@@ -129,15 +129,24 @@ class RoomsApi(object):
         payload = self._req("POST", "/rooms", {"sourceUri": source_uri,
                                                "title": title,
                                                "users": users})
+        if not payload:
+            # an empty/non-JSON 2xx would make Room(None) an AttributeError,
+            # which escapes the caller's WatchTogetherError handling
+            raise WatchTogetherError("POST /rooms -> empty body")
         return Room(payload)
 
     def invite(self, room_id, user_ids):
         # §4: a non-numeric id makes the server leak a Postgres 500 — reject
-        # locally before any request goes out
-        if not all(isinstance(i, int) for i in user_ids):
+        # locally before any request goes out. bool is an int subclass: a bool
+        # id would serialize as true/false and leak the same 500.
+        if not all(isinstance(i, int) and not isinstance(i, bool)
+                   for i in user_ids):
             raise ValueError("user ids must be integers")
         payload = self._req("POST", "/rooms/%s/invite" % room_id,
                             {"users": list(user_ids)})
+        if not payload:
+            raise WatchTogetherError("POST /rooms/%s/invite -> empty body"
+                                     % room_id)
         return Room(payload)
 
 

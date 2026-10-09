@@ -3352,11 +3352,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def _watchtogether_hub_menu(self, room):
         from . import watchtogether as wtwin
+        options = [{'key': 'wt_join', 'display': T(35062, 'Join')}]
+        # Invite only makes sense for the room we are actually in: invitees and
+        # invite are scoped to a room, so on any other tile it would silently
+        # target the wrong room (or say "no one to invite")
+        if wtwin.bridge.room is not None and wtwin.bridge.room.id == room.id:
+            options.append({'key': 'invite', 'display': T(35082, 'Invite…')})
+        options += [{'key': 'wt_remove', 'display': T(35063, 'Remove')},
+                    {'key': 'wt_info', 'display': T(35064, 'Info')}]
         choice = dropdown.showDropdown(
-            [{'key': 'wt_join', 'display': T(35062, 'Join')},
-             {'key': 'invite', 'display': T(35082, 'Invite…')},
-             {'key': 'wt_remove', 'display': T(35063, 'Remove')},
-             {'key': 'wt_info', 'display': T(35064, 'Info')}],
+            options,
             pos=(660, 441),
             close_direction='none',
             set_dropdown_prop=False,
@@ -3372,7 +3377,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             if command:
                 self.processCommand(command)
         elif choice['key'] == 'invite':
-            wtwin.InviteDialog.open()
+            wtwin.InviteDialog.open(room=room)
         elif choice['key'] == 'wt_remove':
             if self._confirm_remove_room(room):
                 wtwin.bridge.remove_room(room)
@@ -3485,8 +3490,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     options.insert(1, {'key': 'start_over', 'display': T(32317, 'Play from beginning')})
                     options.insert(2, {'key': 'resume', 'display': T(32429, "Resume from {}").format(util.timeDisplay(ds.viewOffset.asInt()).lstrip('0').lstrip(':'))})
                 # Only offer hosting when the item's server/ratingKey resolve
-                # (Review Focus 4: no sourceUri otherwise).
-                if ds.server and ds.ratingKey:
+                # (Review Focus 4: no sourceUri otherwise). A server without a
+                # uuid also yields an unresolvable sourceUri.
+                if ds.server and getattr(ds.server, "uuid", None) and ds.ratingKey:
                     options.append({'key': 'start_watch_together',
                                     'display': T(35080, 'Start Watch Together')})
 
