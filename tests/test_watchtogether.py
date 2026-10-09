@@ -291,12 +291,29 @@ class SessionSupervisorTest(unittest.TestCase):
         client = self.open_client()
         self.assertTrue(wait_for(lambda: syncplay.set_ready(
             False, manually_initiated=False) in client.sent))
-        before = len(client.sent)
+
+        def ready_frames():
+            return sum(1 for m in client.sent
+                       if "Set" in m and "ready" in m["Set"])
+
+        before = ready_frames()
         sup.set_ready(False)                 # unchanged: nothing on the wire
-        self.assertEqual(len(client.sent), before)
+        self.assertEqual(ready_frames(), before)
         sup.set_ready(True)
         self.assertTrue(wait_for(lambda: syncplay.set_ready(
             True, manually_initiated=False) in client.sent))
+
+    def test_manual_ready_always_goes_out(self):
+        # a user-pressed play must reach the relay even if isReady already
+        # matched (manuallyInitiated is the signal)
+        sup = self.make()
+        sup.start()
+        client = self.open_client()
+        self.assertTrue(wait_for(lambda: syncplay.set_ready(
+            False, manually_initiated=False) in client.sent))
+        sup.set_ready(False, manually=True)
+        self.assertTrue(wait_for(lambda: syncplay.set_ready(
+            False, manually_initiated=True) in client.sent))
 
     def test_on_open_announces_the_rooms_file(self):
         # §5.8: state is per-connection — the file must be re-announced on

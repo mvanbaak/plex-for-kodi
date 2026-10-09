@@ -200,6 +200,31 @@ class SnapshotTest(BridgeTestCase):
         self.assertFalse(sup.seek_requested)
 
 
+class ReadinessTest(BridgeTestCase):
+    def test_ready_tracks_playback(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = True
+        self.bridge._update_ready(sup)
+        self.assertIs(sup.ready, True)
+        self.player.video = False
+        self.bridge._update_ready(sup)
+        self.assertIs(sup.ready, False)
+
+    def test_local_play_reports_manual_readiness(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_local_change("play")
+        self.assertIs(sup.ready, True)
+        self.assertIs(sup.ready_manual, True)
+
+    def test_local_pause_does_not_report_manual_readiness(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_local_change("pause")
+        self.assertIsNone(sup.ready_manual)
+
+
 class RemoteApplyTest(BridgeTestCase):
     def remote(self, position, paused):
         return {"position": position, "paused": paused, "doSeek": False,
@@ -517,8 +542,10 @@ class TakeoverConfirmTest(BridgeTestCase):
             sourceUri="server://abc/com.plexapp.plugins.library/"
                       "library/metadata/227117"))
 
-    def test_no_playing_key_no_prompt(self):
-        self.assertFalse(wtwin.needs_takeover_confirm(self.room(), ""))
+    def test_unknown_playing_item_prompts(self):
+        # playing but unidentifiable (external player): cannot prove it is the
+        # room's content, so prompt
+        self.assertTrue(wtwin.needs_takeover_confirm(self.room(), ""))
 
     def test_same_item_no_prompt(self):
         self.assertFalse(wtwin.needs_takeover_confirm(self.room(), "227117"))

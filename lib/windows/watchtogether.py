@@ -39,14 +39,14 @@ def parse_source_uri(uri):
 
 
 def needs_takeover_confirm(room, playing_key):
-    """True when joining would take over a *different* item already playing.
+    """True when joining may take over a *different* item already playing.
 
-    No prompt when nothing is playing, or when the playing item is provably
-    the room's own content; unknown room content prompts to be safe."""
-    if not playing_key:
-        return False
+    Call only when a video is playing. Unknown room content or an
+    unidentifiable playing item both prompt, to be safe."""
     _, room_key = parse_source_uri(room.source_uri)
-    return not room_key or str(playing_key) != room_key
+    if not room_key or not playing_key:
+        return True
+    return str(playing_key) != room_key
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):

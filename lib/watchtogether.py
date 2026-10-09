@@ -237,9 +237,9 @@ class SessionSupervisor(object):
 
     def set_ready(self, ready, manually=False):
         """Report readiness, but only when it changes (§6.4). `manually` marks
-        a user-pressed play; automatic buffering reports False."""
+        a user-pressed play, which always goes out even if the value matches."""
         ready = bool(ready)
-        if ready == self._ready_sent:
+        if not manually and ready == self._ready_sent:
             return
         from . import syncplay
         self._ready = ready

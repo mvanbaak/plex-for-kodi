@@ -158,7 +158,9 @@ class Session(object):
         self.on_roster = on_roster
         self.on_event = on_event
         self.relay_ignore = 0       # ignoringOnTheFly.server, live from wire (§5.9)
-        self.local_ignore = 0       # 1 = local-only correction, don't rebroadcast (§5.7)
+        # ignoringOnTheFly.client: 1 means "apply to me but do not rebroadcast".
+        # v1 emits no local drift nudge, so this stays 0 (deferred with tempo).
+        self.local_ignore = 0
         self.latency = Latency()
         self.remote = {"position": 0.0, "paused": True, "doSeek": False,
                        "setBy": None}
