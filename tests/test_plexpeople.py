@@ -52,3 +52,16 @@ def test_friends_skips_entries_without_idraw():
 
 def test_friends_degrades_on_bad_json():
     assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", b"<html>")) == []
+
+
+def test_friends_non_dict_json_is_empty():
+    assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", b"[]")) == []
+
+
+def test_friends_scalar_json_is_empty():
+    assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", b"123")) == []
+
+
+def test_friends_non_dict_data_is_empty():
+    body = json.dumps({"data": [1]}).encode()
+    assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", body)) == []

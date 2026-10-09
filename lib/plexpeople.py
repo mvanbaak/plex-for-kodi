@@ -72,13 +72,17 @@ def friends(token, http=None):
         return []
     try:
         data = json.loads(content.decode("utf-8"))
+        payload = data.get("data") if isinstance(data, dict) else None
+        edges = payload.get("allFriendsV2") if isinstance(payload, dict) else None
+        if not isinstance(edges, list):
+            return []
     except (ValueError, AttributeError, TypeError):
         return []
 
     out = []
-    for edge in (data.get("data") or {}).get("allFriendsV2") or []:
-        user = (edge or {}).get("user") or {}
-        user_id = user.get("idRaw")
+    for edge in edges:
+        user = edge.get("user") if isinstance(edge, dict) else None
+        user_id = user.get("idRaw") if isinstance(user, dict) else None
         if user_id is None:
             continue
         out.append({"id": user_id,
