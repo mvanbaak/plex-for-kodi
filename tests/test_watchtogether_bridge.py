@@ -557,9 +557,9 @@ class TempoTest(BridgeTestCase):
                 return [{"playerid": 1, "type": "video"}]
 
             def SetTempo(self, playerid, tempo):
+                calls.append((playerid, tempo))
                 if fail:
                     raise RuntimeError("no tempo")
-                calls.append((playerid, tempo))
 
         class RPC(object):
             Player = RPCPlayer()
@@ -599,6 +599,20 @@ class TempoTest(BridgeTestCase):
         finally:
             wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
         self.assertEqual(self.player.seek_times, [self.player.position - 2.0])
+
+    def test_set_tempo_failure_backs_off_without_spam(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls, fail=True)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))   # fails -> backs off
+            self.bridge.on_state(self.tempo_state(2.0))   # within backoff: no retry
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(len(calls), 1, "must not hammer a failing SetTempo")
+        self.assertEqual(len(self.player.seek_times), 2, "still hard-seeks")
 
 
 class SourceUriTest(KodiTestCase):

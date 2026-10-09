@@ -177,7 +177,7 @@ class WatchTogetherBridge(object):
         self._auto_join_done = False
         self._local_change_at = 0.0
         self._tempo = 1.0
-        self._tempo_unavailable = False
+        self._tempo_retry_at = 0.0
         self._was_connected = False
 
     # -- startup ------------------------------------------------------------
@@ -428,16 +428,18 @@ class WatchTogetherBridge(object):
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
-        (Kodi 21+ only). Returns True when applied; logs and returns False when
-        the Kodi is too old or the call fails, so the caller can hard-seek."""
+        (Kodi 21+). Returns True when applied. When it is unavailable or the
+        call fails it logs once, backs off, and returns False so the caller can
+        hard-seek instead."""
         if tempo == self._tempo:
             return True
+        now = time.monotonic()
+        if now < self._tempo_retry_at:
+            return False
         if util.KODI_VERSION_MAJOR < 21:
-            if not self._tempo_unavailable:
-                self._tempo_unavailable = True
-                util.DEBUG_LOG("Watch Together: tempo catch-up needs Kodi 21+ "
-                               "(have {0}); degrading to hard seek".format(
-                                   util.KODI_VERSION_MAJOR))
+            self._tempo_retry_at = now + 3600.0
+            util.LOG("Watch Together: tempo catch-up needs Kodi 21+ (have {0}); "
+                     "using hard seek".format(util.KODI_VERSION_MAJOR))
             return False
         try:
             players = util.rpc.Player.GetActivePlayers() or []
@@ -450,8 +452,12 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: tempo {0}".format(tempo))
             return True
         except Exception as exc:
-            util.ERROR("Watch Together: SetTempo failed: {0}".format(exc))
+            # SetTempo is advertised on Kodi 21 but the player may refuse it
+            # (seen on 21.0 after a seek). Back off and hard-seek meanwhile.
+            self._tempo_retry_at = now + 60.0
             self._tempo = 1.0
+            util.LOG("Watch Together: SetTempo failed ({0}); using hard seek "
+                     "(retry in 60s)".format(exc))
             return False
 
     def _seek_to(self, target):
