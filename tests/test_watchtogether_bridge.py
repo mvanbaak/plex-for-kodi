@@ -614,6 +614,38 @@ class TempoTest(BridgeTestCase):
         self.assertEqual(len(calls), 1, "must not hammer a failing SetTempo")
         self.assertEqual(len(self.player.seek_times), 2, "still hard-seeks")
 
+    def test_tempo_is_skipped_while_seeking(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        ENV.cond_visibility["Player.Seeking"] = True
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))
+        finally:
+            ENV.cond_visibility.pop("Player.Seeking", None)
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(calls, [], "no SetTempo while seeking")
+        self.assertEqual(self.player.seek_times, [], "and no seek either")
+
+    def test_tempo_applies_once_the_player_is_stable(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        ENV.cond_visibility["Player.Seeking"] = True
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))     # skipped
+            ENV.cond_visibility.pop("Player.Seeking", None)
+            self.bridge.on_state(self.tempo_state(2.0))     # stable -> tempo
+        finally:
+            ENV.cond_visibility.pop("Player.Seeking", None)
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(calls, [(1, 0.95)])
+        self.assertEqual(self.player.seek_times, [])
+
 
 class SourceUriTest(KodiTestCase):
     """parse_source_uri: the room sourceUri -> (machine, ratingKey) mapping

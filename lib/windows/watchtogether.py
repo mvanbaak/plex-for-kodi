@@ -412,13 +412,15 @@ class WatchTogetherBridge(object):
             applied = True
         elif action and action[0] == "tempo":
             # §6.2 gentle catch-up: slow to 0.95 with pitch preserved (Kodi 21+)
-            if not self._set_tempo(action[1]):
+            result = self._set_tempo(action[1])
+            if result is False:
                 # no tempo here: degrade to a hard seek so drift still converges
                 target = remote.get("position", 0.0) + \
                     (0 if remote.get("paused") else session.latency.forward_delay)
                 pl.wt_applying_remote = time.monotonic() + 2.0
                 self._seek_to(target)
                 applied = True
+            # result True: tempo applied; None: player busy, retry next tick
         else:
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
@@ -428,11 +430,16 @@ class WatchTogetherBridge(object):
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
-        (Kodi 21+). Returns True when applied. When it is unavailable or the
-        call fails it logs once, backs off, and returns False so the caller can
-        hard-seek instead."""
+        (Kodi 21+). Returns True when applied, False when unavailable/failed
+        (caller hard-seeks), or None when the player is busy seeking/caching
+        (retry next tick)."""
         if tempo == self._tempo:
             return True
+        # SetTempo is refused while the player is mid-seek or buffering (seen
+        # on Kodi 21.0); don't call it then, and don't hard-seek either.
+        if (xbmc.getCondVisibility("Player.Seeking")
+                or xbmc.getCondVisibility("Player.Caching")):
+            return None
         now = time.monotonic()
         if now < self._tempo_retry_at:
             return False
@@ -452,8 +459,8 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: tempo {0}".format(tempo))
             return True
         except Exception as exc:
-            # SetTempo is advertised on Kodi 21 but the player may refuse it
-            # (seen on 21.0 after a seek). Back off and hard-seek meanwhile.
+            # SetTempo is advertised on Kodi 21 but the player may still refuse
+            # it. Back off and hard-seek meanwhile.
             self._tempo_retry_at = now + 60.0
             self._tempo = 1.0
             util.LOG("Watch Together: SetTempo failed ({0}); using hard seek "
