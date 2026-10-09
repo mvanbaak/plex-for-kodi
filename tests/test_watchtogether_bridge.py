@@ -446,6 +446,23 @@ class HostFlowTest(BridgeTestCase):
                         "the start-paused hook must be armed before play()")
         self.assertEqual(len(self.opened), 1, "the item must be opened")
 
+    def test_host_closes_the_lobby_when_playback_ends(self):
+        # backing out without Start/Cancel must not orphan the non-modal lobby
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+
+        self.bridge._open_paused(FakeItem())
+
+        self.assertTrue(lobby.closed, "the lobby must close when playback ends")
+        self.assertIsNone(self.bridge.lobby)
+
+    def test_open_paused_without_a_lobby_is_a_noop(self):
+        # Start/Cancel may already have cleared it; the close must not raise
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._open_paused(FakeItem())
+        self.assertIsNone(self.bridge.lobby)
+
     def test_host_joins_the_created_room(self):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
         self.assertEqual(self.joined, ["ca8cfezmke4"])

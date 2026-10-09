@@ -492,6 +492,9 @@ class WatchTogetherBridge(object):
         except Exception:
             util.ERROR()
         finally:
+            # the lobby must not outlive the host's playback: if Start/Cancel
+            # already cleared it this is a no-op
+            self._close_lobby()
             if self.supervisor is not None:
                 self.disconnect()
 
