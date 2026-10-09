@@ -352,6 +352,22 @@ class SessionTest(unittest.TestCase):
                                            "manuallyInitiated": True}}})
         self.assertIs(sess.roster[ident]["isReady"], True)
 
+    def test_set_ready_fires_on_ready(self):
+        seen = []
+        s = syncplay.Session("room", "me", on_ready=lambda k, v: seen.append((k, v)))
+        s.on_message({"Set": {"ready": {"username": "u", "isReady": True}}})
+        assert seen and seen[-1][1] is True
+
+    def test_ready_member_ids_and_members_ready(self):
+        roster = {
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": False},
+        }
+        assert syncplay.ready_member_ids(roster) == {"1"}
+        assert syncplay.members_ready(["1"], roster) is True
+        assert syncplay.members_ready(["1", "2"], roster) is False
+        assert syncplay.members_ready(["3"], roster) is False
+
     def test_set_user_event_left_fires_and_drops_roster_entry(self):
         # §5.8 — transport death reaches peers in ~0.2 s as this event
         sess, _ = self.make()

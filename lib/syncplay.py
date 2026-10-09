@@ -86,6 +86,26 @@ def set_file(uri, playing=False):
     return {"Set": {"file": {"name": inner}}}
 
 
+def ready_member_ids(roster):
+    """userIDs (as str) of roster entries with isReady is True."""
+    ids = set()
+    for identity, entry in roster.items():
+        if not (isinstance(entry, dict) and entry.get("isReady") is True):
+            continue
+        try:
+            parsed = json.loads(strip_identity(identity))
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("userID") is not None:
+            ids.add(str(parsed["userID"]))
+    return ids
+
+
+def members_ready(member_ids, roster):
+    """True only when every member id is present AND ready."""
+    return set(map(str, member_ids)) <= ready_member_ids(roster)
+
+
 class Latency(object):
     """§6.1 latency compensation + forward-delay estimation.
 
@@ -141,6 +161,7 @@ class Session(object):
     on_state(remote)  — a remote (non-self) State was applied, per frame
     on_roster(roster) — a List snapshot arrived
     on_event(kind, key) — "left"/"joined" for a roster identity (§5.8)
+    on_ready(key, is_ready) — a Set{ready} updated an entry's readiness
 
     An exception in a callback propagates to the transport loop and tears
     down the connection (surfaced as WSClient's on_close reason) — callbacks
@@ -151,12 +172,13 @@ class Session(object):
     """
 
     def __init__(self, room, identity, on_state=None, on_roster=None,
-                 on_event=None):
+                 on_event=None, on_ready=None):
         self.room = room
         self.identity = identity
         self.on_state = on_state
         self.on_roster = on_roster
         self.on_event = on_event
+        self.on_ready = on_ready
         self.relay_ignore = 0       # ignoringOnTheFly.server, live from wire (§5.9)
         # ignoringOnTheFly.client: 1 means "apply to me but do not rebroadcast".
         # v1 emits no local drift nudge, so this stays 0 (deferred with tempo).
@@ -203,6 +225,8 @@ class Session(object):
             if key:
                 entry = self.roster.setdefault(key, {})
                 entry["isReady"] = ready.get("isReady")
+                if self.on_ready:
+                    self.on_ready(key, ready.get("isReady"))
         user = sub.get("user")
         if isinstance(user, dict):
             for key, entry in user.items():
