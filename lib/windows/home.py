@@ -368,6 +368,19 @@ class PlaylistsSection(VirtualSection):
 playlists_section = PlaylistsSection()
 
 
+class WatchTogetherSection(object):
+    """Sidebar marker for Watch Together — not a library: no hubs, no
+    library menu, no sectionChanged (guards key off `is`-identity)."""
+    key = 'watchtogether'
+    type = 'watchtogether'
+    title = T(35053, 'Watch Together')
+    locations = []
+    isMapped = False
+
+
+watchtogether_section = WatchTogetherSection()
+
+
 # item types that can be pinned to the top bar as a view of their own, per library type
 PINNABLE_TYPES = {
     'movie': ('collection',),
@@ -774,6 +787,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         util.CRON.registerReceiver(self)
         self.updateProperties()
         self.checkPlexDirectHosts(list(plexapp.SERVERMANAGER.serversByUuid.values()), source="stored")
+
+        from . import watchtogether as wtwin
+        wtwin.bridge.start()
 
     def closeWRecompileTpls(self):
         self._applyTheme = False
@@ -3104,6 +3120,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return
 
         section = item.dataSource
+        if section is watchtogether_section:
+            return
+
         choice = None
         if isinstance(section, PinnedTypeSection):
             choice = dropdown.showDropdown(
@@ -3585,6 +3604,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 self.sectionList.selectItem(self.bottomItem)
                 item = self.sectionList[self.bottomItem]
 
+        if item.dataSource is watchtogether_section:
+            # virtual entry: keep the current hubs on screen
+            return
+
         if item.getProperty('is.home'):
             self.storeLastBG()
 
@@ -3983,6 +4006,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 if show_pm_indicator:
                     mli.setBoolProperty('is.mapped', section.isMapped)
             items.append(mli)
+
+        if util.getSetting('watchtogether.enable_sidebar', True):
+            wtmli = kodigui.ManagedListItem(watchtogether_section.title,
+                                            thumbnailImage='script.plex/home/type/channels.png',
+                                            data_source=watchtogether_section)
+            wtmli.setProperty('item', '1')
+            items.append(wtmli)
 
         self.bottomItem = len(items) - 1
 
@@ -4678,6 +4708,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.sectionChangeTimeout = None
         elif section.type in ('playlists',):
             self.processCommand(opener.handleOpen(playlists.PlaylistsWindow))
+        elif section is watchtogether_section:
+            from . import watchtogether as wtwin
+            wtwin.show()
 
     def onNewServer(self, **kwargs):
         self.showServers(from_refresh=True)
