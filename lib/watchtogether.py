@@ -81,7 +81,7 @@ def _http_request(method, path, body=None, token=None):
 
 
 class RoomsApi(object):
-    """The §4 surface used by v1: list, fetch, leave. create/invite = v2."""
+    """The §4 surface: list, fetch, leave, create, invite."""
 
     def __init__(self, token, transport=None):
         self.token = token
@@ -126,10 +126,19 @@ class RoomsApi(object):
             pass
 
     def create(self, source_uri, title, users=None):
-        raise NotImplementedError("v2: host capability from Kodi")
+        payload = self._req("POST", "/rooms", {"sourceUri": source_uri,
+                                               "title": title,
+                                               "users": users})
+        return Room(payload)
 
     def invite(self, room_id, user_ids):
-        raise NotImplementedError("v2: host capability from Kodi")
+        # §4: a non-numeric id makes the server leak a Postgres 500 — reject
+        # locally before any request goes out
+        if not all(isinstance(i, int) for i in user_ids):
+            raise ValueError("user ids must be integers")
+        payload = self._req("POST", "/rooms/%s/invite" % room_id,
+                            {"users": list(user_ids)})
+        return Room(payload)
 
 
 BACKOFF = (1.0, 2.0, 4.0, 8.0, 30.0)
