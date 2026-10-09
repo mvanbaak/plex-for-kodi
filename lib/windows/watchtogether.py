@@ -11,6 +11,7 @@ from __future__ import absolute_import
 
 import threading
 import time
+import uuid
 
 from kodi_six import xbmc, xbmcgui
 from plexnet import plexapp, plexlibrary, plexobjects
@@ -492,7 +493,8 @@ class WatchTogetherBridge(object):
             if not items:
                 util.DEBUG_LOG("Watch Together: room item not found")
                 return
-            player.PLAYER.playVideo(items[0], resume=False)
+            player.PLAYER.playVideo(items[0], resume=False,
+                                    session_id=str(uuid.uuid4()))
             player.PLAYER.control("pause")   # §6.4: join paused, relay seeks
             util.DEBUG_LOG("Watch Together: started room playback")
         except Exception:

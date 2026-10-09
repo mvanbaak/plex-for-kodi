@@ -2844,6 +2844,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
             if mli.dataSource is None:
                 return
+            if self._isWatchTogetherItem(mli.dataSource):
+                return          # a room tile has no watched state
             item = mli.dataSource
 
         if super(HomeWindow, self).toggleWatched(item, state=state) is None:
@@ -3378,6 +3380,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return
 
         ds = mli.dataSource
+
+        if self._isWatchTogetherItem(ds):
+            # a room tile has no media context menu (watch/mark/visit)
+            return
 
         # Determine the hub's source section and catalog_id
         is_home = not self.lastSection or self.lastSection.key is None
