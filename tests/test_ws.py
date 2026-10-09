@@ -122,6 +122,26 @@ class HandshakeTest(unittest.TestCase):
         head = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
         self.assertEqual(ws.handshake_response_status(head), 101)
 
+    def test_accept_key_matches_the_rfc6455_vector(self):
+        # RFC6455 §1.3
+        self.assertEqual(ws.accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+                         "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+
+    def test_verifies_the_accept_digest_when_key_given(self):
+        key = "dGhlIHNhbXBsZSBub25jZQ=="
+        head = (b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n")
+        self.assertEqual(ws.handshake_response_status(head, key), 101)
+
+    def test_rejects_a_wrong_accept_digest(self):
+        head = (b"HTTP/1.1 101 Switching Protocols\r\n"
+                b"Upgrade: websocket\r\n"
+                b"Sec-WebSocket-Accept: wrong-value\r\n")
+        with self.assertRaises(ws.HandshakeError) as ctx:
+            ws.handshake_response_status(head, "dGhlIHNhbXBsZSBub25jZQ==")
+        self.assertIn("Sec-WebSocket-Accept", str(ctx.exception))
+
     def test_rejects_non_101(self):
         head = b"HTTP/1.1 400 Bad Request\r\n"
         with self.assertRaises(ws.HandshakeError) as ctx:
@@ -131,6 +151,15 @@ class HandshakeTest(unittest.TestCase):
     def test_rejects_garbage(self):
         with self.assertRaises(ws.HandshakeError):
             ws.handshake_response_status(b"not http at all")
+
+
+def _accept_from(head):
+    """Server-side Sec-WebSocket-Accept for the client's key (RFC6455)."""
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"sec-websocket-key:"):
+            key = line.split(b":", 1)[1].strip().decode()
+            return ws.accept_key(key).encode()
+    return b""
 
 
 class FakeRelay(threading.Thread):
@@ -165,7 +194,7 @@ class FakeRelay(threading.Thread):
             conn.sendall(
                 b"HTTP/1.1 101 Switching Protocols\r\n"
                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+                b"Sec-WebSocket-Accept: " + _accept_from(head) + b"\r\n\r\n")
             decoder = ws.FrameDecoder()
             # 1. expect the client's first text frame
             text1 = self._next_text(conn, decoder)
@@ -242,7 +271,7 @@ class CountingRelay(threading.Thread):
             conn.sendall(
                 b"HTTP/1.1 101 Switching Protocols\r\n"
                 b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+                b"Sec-WebSocket-Accept: " + _accept_from(head) + b"\r\n\r\n")
             decoder = ws.FrameDecoder()
             end = time.time() + self.deadline
             try:
