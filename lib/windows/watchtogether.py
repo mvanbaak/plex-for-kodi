@@ -168,6 +168,17 @@ def confirm_switch():
         util.T(35061, "Leave the current room and join this one?"))
 
 
+def confirm_leave():
+    """Confirm leaving the room (used by the OSD menu and the dialog)."""
+    from . import optionsdialog
+    button = optionsdialog.show(
+        util.T(35056, "Leave room"),
+        util.T(35070, "Leave this Watch Together room?"),
+        util.T(32328, "Yes"),
+        util.T(32329, "No"))
+    return button == 0
+
+
 def _ws_factory(host, port, on_open, on_message, on_close):
     return ws.WSClient(host, port, on_message, on_open=on_open, on_close=on_close)
 
@@ -783,7 +794,8 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     height = 1080
 
     LIST_ID = 100
-    LEAVE_ID = 60
+    CLOSE_ID = 60
+    LEAVE_ID = 61
 
     def onFirstInit(self):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
@@ -791,9 +803,9 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
         self._ticks = 0
         bridge.refresh_room()
         self._sync()
-        # the roster can be empty; focus the Leave button so the dialog is
-        # never a dead end
-        self.setFocusId(self.LEAVE_ID)
+        # focus Close (not Leave): OK must dismiss the popup, leaving must be
+        # a deliberate second choice
+        self.setFocusId(self.CLOSE_ID)
         util.CRON.registerReceiver(self)
 
     def onClosed(self):
@@ -820,12 +832,15 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
         items = [kodigui.ManagedListItem(
             u.get('title') or u.get('username') or '',
             u.get('username') or '',
+            thumbnailImage=u.get('thumb') or '',
             data_source=u) for u in participants]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
     def onClick(self, controlID):
-        if controlID == self.LEAVE_ID:
+        if controlID == self.CLOSE_ID:
+            self.doClose()
+        elif controlID == self.LEAVE_ID and confirm_leave():
             self.leaveRoom()
 
     @busy.dialog()

@@ -1453,7 +1453,8 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
         if not choice:
             return
         if choice['key'] == 'wt_leave':
-            wtwin.leave_room()
+            if wtwin.confirm_leave():
+                wtwin.leave_room()
         elif choice['key'] == 'wt_participants':
             wtwin.show_participants()
 

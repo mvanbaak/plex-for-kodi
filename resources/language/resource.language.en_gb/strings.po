@@ -3432,3 +3432,7 @@ msgstr ""
 msgctxt "#35069"
 msgid "Close"
 msgstr ""
+
+msgctxt "#35070"
+msgid "Leave this Watch Together room?"
+msgstr ""
