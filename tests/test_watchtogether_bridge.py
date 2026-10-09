@@ -512,6 +512,27 @@ class InviteeSourceTest(BridgeTestCase):
         self.assertEqual([i.id for i in out], [5])
         self.assertEqual(out[0].title, "Home")
 
+    def test_home_user_title_falls_back_to_username(self):
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 5, "title": "", "username": "alice", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: []
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual(out[0].title, "alice")
+
     def test_invitees_uses_an_explicit_room(self):
         saved_account = wtwin.plexapp.ACCOUNT
         saved_friends = wtwin.plexpeople.friends
@@ -662,6 +683,32 @@ class HostFlowTest(BridgeTestCase):
         self.assertTrue(self.player.pauseAfterPlaybackStarted,
                         "the start-paused hook must be armed before play()")
         self.assertEqual(len(self.opened), 1, "the item must be opened")
+
+    def test_host_does_not_open_the_lobby_before_the_video(self):
+        # a modal lobby shown first blocks the video window activation
+        # ("Activate of window ... refused because there are active modal
+        # dialogs"), so it must be deferred until the video is up
+        opened = []
+        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+        self.bridge._lobby_when_playing = lambda: None   # don't race the thread
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(opened, [])
+
+    def test_lobby_opens_once_the_video_is_playing(self):
+        self.bridge._hosting = True
+        opened = []
+        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+        self.player.video = True
+        self.bridge._lobby_when_playing()
+        self.assertEqual(opened, [True])
+
+    def test_lobby_does_not_open_when_not_hosting(self):
+        self.bridge._hosting = False
+        opened = []
+        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+        self.player.video = True
+        self.bridge._lobby_when_playing()
+        self.assertEqual(opened, [])
 
     def test_host_closes_the_lobby_when_playback_ends(self):
         # backing out without Start/Cancel must not orphan the non-modal lobby

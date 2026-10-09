@@ -466,9 +466,8 @@ class WatchTogetherBridge(object):
         if room is None:
             return
         self._hosting = True
-        # the lobby goes first: the video window's play() blocks, so anything
-        # after _open_paused never runs until playback ends
-        self._open_lobby()
+        # the lobby is shown by _open_paused once the video window is up: a
+        # modal dialog shown first blocks the video from activating
         self._open_paused(item)
 
     @busy.dialog()
@@ -552,10 +551,21 @@ class WatchTogetherBridge(object):
 
         videoplayer.play() blocks, so the pause cannot be applied after it
         returns. Arm the player's existing start-paused hook instead
-        (pauseAfterPlaybackStarted, applied on AVStarted)."""
+        (pauseAfterPlaybackStarted, applied on AVStarted).
+
+        The lobby is a modal WindowXMLDialog, so it must not be shown before
+        the video window activates: Kodi refuses the activation while a modal
+        dialog is up ("Activate of window ... refused because there are active
+        modal dialogs"). Show it once playback has started, from a helper
+        thread, while play() blocks the main thread."""
         pl = _player()
         if pl is not None:
             pl.pauseAfterPlaybackStarted = True
+        if self._hosting:
+            thread = threading.Thread(target=self._lobby_when_playing,
+                                      name="wt-lobby-open")
+            thread.daemon = True
+            thread.start()
         try:
             self._play_item(item)
         except Exception:
@@ -566,6 +576,21 @@ class WatchTogetherBridge(object):
             self._close_lobby()
             if self.supervisor is not None:
                 self.disconnect()
+
+    def _lobby_when_playing(self):
+        """Show the host lobby once the video window is up (see _open_paused).
+
+        Runs on its own thread while videoplayer.play() blocks the main one;
+        gives up if hosting ends or Start/Cancel already closed it."""
+        for _ in range(300):            # up to ~30 s
+            if not self._hosting or self.lobby is not None:
+                return
+            pl = _player()
+            if pl is not None and pl.isPlayingVideo():
+                break
+            time.sleep(0.1)
+        if self._hosting and self.lobby is None:
+            self._open_lobby()
 
     def _play_item(self, item):
         from . import videoplayer
@@ -629,7 +654,8 @@ class WatchTogetherBridge(object):
                 user_id = int(user.get("id"))
             except (TypeError, ValueError):
                 continue
-            out.append({"id": user_id, "title": user.get("title") or "",
+            out.append({"id": user_id,
+                        "title": user.get("title") or user.get("username") or "",
                         "thumb": user.get("thumb") or ""})
         return out
 
@@ -1300,7 +1326,9 @@ class InviteDialog(kodigui.BaseDialog):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
         self._invitees = []
         self._load()
-        self.setFocusId(self.LIST_ID)
+        # focus OK, not the (still empty) list: focusing an empty list at show
+        # makes Kodi log "Control 100 ... asked to focus, but it can't"
+        self.setFocusId(self.OK_ID)
 
     def _load(self):
         thread = threading.Thread(target=self._fetch, name="wt-invitees")
@@ -1328,6 +1356,9 @@ class InviteDialog(kodigui.BaseDialog):
                 data_source=row["id"],
                 properties={"access_unknown": row["access_unknown"]})
             for row in invite_rows(self._invitees)])
+        if self._invitees:
+            # list was empty at show, so focus it now that it has rows
+            self.setFocusId(self.LIST_ID)
 
     def _selected_ids(self):
         return [item.dataSource for item in self.peopleList.items

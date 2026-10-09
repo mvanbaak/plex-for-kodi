@@ -25,6 +25,17 @@ def test_friends_empty_is_empty():
     assert plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", body)) == []
 
 
+def test_friends_falls_back_to_username_when_displayname_empty():
+    # most real friends have an empty displayName but a username (live probe)
+    body = json.dumps({"data": {"allFriendsV2": [
+        {"user": {"idRaw": 7, "displayName": "", "username": "alice", "avatar": "a"}},
+        {"user": {"idRaw": 8, "displayName": "Bob", "username": "bob", "avatar": "b"}},
+    ]}}).encode()
+    out = plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", body))
+    assert out == [{"id": 7, "title": "alice", "thumb": "a"},
+                   {"id": 8, "title": "Bob", "thumb": "b"}]
+
+
 def test_friends_posts_graphql_with_token_header():
     calls = []
 

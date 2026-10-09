@@ -95,7 +95,7 @@ def friends(token, http=None):
         except (TypeError, ValueError):
             continue
         out.append({"id": user_id,
-                    "title": user.get("displayName", ""),
+                    "title": user.get("displayName") or user.get("username") or "",
                     "thumb": user.get("avatar", "")})
     return out
 

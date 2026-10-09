@@ -1,6 +1,6 @@
 {% extends "base.xml.tpl" %}
 {% block headers %}
-<defaultcontrol>100</defaultcontrol>
+<defaultcontrol>61</defaultcontrol>
 {% endblock headers %}
 {% block backgroundcolor %}{% endblock %}
 {% block controls %}
