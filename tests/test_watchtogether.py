@@ -158,3 +158,225 @@ class RoomsApiTest(unittest.TestCase):
             api.create(source_uri="x", title="t")
         with self.assertRaises(NotImplementedError):
             api.invite("ca8cfezmke4", [1000002])
+
+
+class FakeTimer(object):
+    def __init__(self, interval, callback, repeat=True, name=None):
+        self.interval = interval
+        self.callback = callback
+        self.repeat = repeat
+        self.name = name
+        self.canceled = False
+        self.joined = False
+
+    def cancel(self):
+        self.canceled = True
+
+    def join(self, timeout=None):
+        self.joined = True
+
+
+class FakeTimerFactory(object):
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, interval, callback, repeat=True):
+        t = FakeTimer(interval, callback, repeat=repeat)
+        self.calls.append((interval, callback, repeat))
+        return t
+
+class FakeWS(object):
+    def __init__(self, state=None):
+        self.sent = []
+        self.state = state or {"open": False, "ever": False, "closed": False}
+        self._on_open = None
+        self._on_message = None
+        self._on_close = None
+        self.started = False
+        self.closed = False
+
+    def start(self):
+        self.started = True
+
+    def send(self, obj):
+        self.sent.append(obj)
+        if self.state.get("echo_on_send"):
+            pass
+
+    def close(self):
+        self.closed = True
+        if self._on_close:
+            try:
+                self._on_close("close")
+            except Exception:
+                pass
+
+    def trigger_open(self):
+        if self._on_open:
+            self._on_open()
+
+    def trigger_close(self):
+        if self._on_close:
+            self._on_close("close")
+
+
+class FakeWSFactory(object):
+    def __init__(self, ws=None):
+        self.ws = ws or FakeWS()
+        self.calls = []
+
+    def __call__(self, host, port, on_open, on_message, on_close):
+        self.ws._on_open = on_open
+        self.ws._on_message = on_message
+        self.ws._on_close = on_close
+        self.calls.append((host, port))
+        return self.ws
+
+
+class FakeClock(object):
+    def __init__(self, t=0.0):
+        self.t = t
+        self.m = t
+
+    def time(self):
+        return self.t
+
+    def monotonic(self):
+        return self.m
+
+    def advance(self, s):
+        self.t += s
+        self.m += s
+
+
+class TestSessionSupervisor(unittest.TestCase):
+    ROOM_JSON = {
+        "id": "ca8cfezmke4",
+        "title": "A Fazenda – S18 • E20",
+        "sourceUri": "server://x/metadata/227117",
+        "createdBy": 1000001,
+        "startsAt": 1791128438,
+        "updatedAt": 1791128438,
+        "endsAt": 1791139238,
+        "syncplayHost": "pop-fra00.syncplay.plex.services",
+        "syncplayPort": 7776,
+        "users": [
+            {"id": 1000001, "username": "owner", "title": "Owner", "uuid": "u1"},
+            {"id": 1000002, "username": "guest", "title": "Guest", "uuid": "u2"},
+        ],
+    }
+
+    def _room(self):
+        return watchtogether.Room(self.ROOM_JSON)
+
+    def _identity(self):
+        return {"device": "d", "name": "n", "user": 1000002}
+
+    def test_start_then_stop(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON))
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.start()
+        sup.stop(timeout=0.01)
+        self.assertTrue(sup._stop.is_set())
+
+    def api(self, *responses):
+        transport = FakeTransport(list(responses))
+        return watchtogether.RoomsApi(token="tok", transport=transport), transport
+
+    def test_connect_open_sends_hello_list_setready(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON))
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.start()
+        ws.trigger_open()
+        ws.trigger_close()
+        sup.stop(timeout=0.01)
+        self.assertTrue(ws.started)
+        self.assertTrue(len(ws.sent) >= 3)
+
+    def test_on_message_forwards_to_session_on_state(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON))
+        states = []
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.on_state = lambda d: states.append(d)
+        sup.start()
+        ws.trigger_open()
+        ws._on_message('{"State":{"playstate":{"position":5,"paused":true,"doSeek":false,"setBy":"x"}}}')
+        ws.trigger_close()
+        sup.stop(timeout=0.01)
+        self.assertTrue(states)
+
+    def test_poll_room_refreshes_roster(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON), (200, dict(self.ROOM_JSON, users=self.ROOM_JSON['users'])))
+        roster = []
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.on_roster = lambda d: roster.append(d)
+        sup.start()
+        ws.trigger_open()
+        ws.trigger_close()
+        sup.stop(timeout=0.01)
+
+    def test_poll_room_gone_calls_on_gone_and_stops(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON), (404, "gone"))
+        gone = []
+        clock = FakeClock(0.0)
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf, clock=clock)
+        sup.on_gone = lambda: gone.append(True)
+        sup.start()
+        ws.trigger_open()
+        ws.trigger_close()
+        clock.advance(10.0)  # let backoff pass
+        sup.stop(timeout=0.01)
+        self.assertTrue(gone)
+
+    def test_outbound_state_before_connect_only_stores(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON))
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.start()
+        res = sup.outbound_state({"position": 1, "paused": True})
+        self.assertFalse(res)
+        sup.stop(timeout=0.01)
+
+    def test_outbound_state_sends_while_connected(self):
+        room = self._room()
+        identity = self._identity()
+        tf = FakeTimerFactory()
+        ws = FakeWS()
+        wsf = FakeWSFactory(ws)
+        api, _ = self.api((200, self.ROOM_JSON))
+        sup = watchtogether.SessionSupervisor(room, identity, token="tok", ws_factory=wsf, transport=api._transport, timer_factory=tf)
+        sup.start()
+        ws.trigger_open()
+        res = sup.outbound_state({"position": 1, "paused": True})
+        self.assertTrue(res)
+        ws.trigger_close()
+        sup.stop(timeout=0.01)

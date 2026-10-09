@@ -9,6 +9,7 @@ never read or log a 401 body — it leaks internal service URLs.
 
 from __future__ import absolute_import
 
+import threading
 import requests
 
 BASE = "https://together.plex.tv"
@@ -128,3 +129,277 @@ class RoomsApi(object):
 
     def invite(self, room_id, user_ids):
         raise NotImplementedError("v2: host capability from Kodi")
+
+
+BACKOFF = (1.0, 2.0, 4.0, 8.0, 30.0)
+TICK = 0.1
+POLL = 15.0
+
+
+class SessionSupervisor(object):
+    def __init__(self, room, identity, token, ws_factory, transport=None,
+                 clock=None, abort=None, timer_factory=None, log=None):
+        from . import syncplay
+        self.room = room
+        self.identity = identity
+        self.api = RoomsApi(token, transport=transport)
+        self.ws_factory = ws_factory
+        if clock is None:
+            import time
+
+            class _Clock(object):
+                def time(self):
+                    return time.time()
+
+                def monotonic(self):
+                    return time.monotonic()
+
+            clock = _Clock()
+        self.clock = clock
+        if abort is None:
+            def abort():
+                return False
+        self.abort = abort
+        self.timer_factory = timer_factory
+        if log is None:
+            def log(msg):
+                pass
+        self.log = log
+
+        self.on_state = None
+        self.on_roster = None
+        self.on_disconnected = None
+        self.on_gone = None
+        self.on_event = None
+
+        self.session = None
+        self.connected = False
+        self._local = None
+        self._gone = False
+        self._stop = threading.Event()
+        self._thread = None
+        self._client = None
+        self._heartbeat = None
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="wt-supervisor")
+        self._thread.daemon = True
+        self._thread.start()
+        return self
+
+    def stop(self, timeout=5.0):
+        """Idempotent; safe to call from the supervisor thread itself (no join)."""
+        self._stop.set()
+        client, self._client = self._client, None
+        if client:
+            try:
+                client.close()
+            except Exception:
+                pass
+        self._stop_heartbeat()
+        hb = self._heartbeat
+        if hb:
+            try:
+                hb.cancel()
+            except Exception:
+                pass
+        thread = self._thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout)
+        self._thread = None
+        self._client = None
+        self._heartbeat = None
+
+    def _stopping(self):
+        return self._stop.is_set() or self.abort()
+
+    def outbound_state(self, local):
+        self._local = local
+        session = self.session
+        client = self._client
+        if session is None or client is None or not self.connected:
+            return False
+        try:
+            sent = self._send(session.outbound_state(local, self.clock.monotonic(), self.clock.time()))
+            return bool(sent)
+        except Exception as exc:
+            self.log("Watch Together: send failed ({0})".format(exc.__class__.__name__))
+            return False
+
+    def _loop(self):
+        started = False
+        failures = 0
+        while not self._stopping() and not self._gone:
+            if started:
+                delay = BACKOFF[min(max(failures - 1, 0), len(BACKOFF) - 1)]
+                if not self._sleep(delay):
+                    break
+            started = True
+            if self._poll_room() is False:
+                break
+            if self._attempt():
+                failures = 0
+            else:
+                failures += 1
+
+    def _sleep(self, delay):
+        if delay <= 0:
+            return True
+        end = self.clock.monotonic() + delay
+        # if clock jumped past end (fake clock advanced), wake immediately
+        if self.clock.monotonic() >= end:
+            return True
+        while self.clock.monotonic() < end:
+            if self._stopping():
+                return False
+            rem = end - self.clock.monotonic()
+            if rem <= 0:
+                return True
+            w = min(0.1, rem)
+            self._stop.wait(w)
+        return True
+
+    def _mark_gone(self):
+        if self._gone:
+            return
+        self._gone = True
+        if self.on_gone:
+            try:
+                self.on_gone()
+            except Exception:
+                pass
+
+    def _poll_room(self):
+        try:
+            fresh = self.api.room(self.room.id)
+        except (RoomGone, NotMember, AuthError) as exc:
+            self.log("Watch Together: room unavailable ({0})".format(exc.__class__.__name__))
+            self._mark_gone()
+            return False
+        except WatchTogetherError as exc:
+            self.log("Watch Together: room refresh failed ({0})".format(exc))
+            return True
+        self.room = fresh
+        if self.on_roster:
+            try:
+                self.on_roster(fresh)
+            except Exception:
+                pass
+        return True
+
+    def _attempt(self):
+        state = {"open": False, "ever": False, "closed": False}
+
+        def on_open():
+            state["open"] = state["ever"] = True
+            self.connected = True
+            from . import syncplay
+            self._send(syncplay.hello(self.room.id, self.identity))
+            self._send(syncplay.list_request())
+            self._send(syncplay.set_ready(True))
+            self._start_heartbeat()
+
+        def on_message(text):
+            session = self.session
+            if session:
+                try:
+                    session.on_message(text, self.clock.monotonic())
+                except Exception:
+                    pass
+
+        def on_close(reason):
+            state["open"] = False
+            state["closed"] = True
+            self.connected = False
+            self._stop_heartbeat()
+
+        from . import syncplay
+        self.session = syncplay.Session(self.room.id, self.identity,
+                                        on_state=self.on_state,
+                                        on_event=self.on_event)
+        client = self.ws_factory(self.room.syncplay_host, self.room.syncplay_port,
+                                 on_open, on_message, on_close)
+        self._client = client
+        opened = self._pump(client, state)
+        try:
+            client.close()
+        except Exception:
+            pass
+        self._stop_heartbeat()
+        self._client = None
+        self.connected = False
+        self.session = None
+        if opened and not self._stopping() and not self._gone and self.on_disconnected:
+            try:
+                self.on_disconnected()
+            except Exception:
+                pass
+        return opened
+
+    def _pump(self, client, state):
+        client.start()
+        last_poll = self.clock.monotonic()
+        while not self._stopping():
+            if state["closed"]:
+                break
+            if state["open"] and self.clock.monotonic() - last_poll >= POLL:
+                last_poll = self.clock.monotonic()
+                if self._poll_room() is False:
+                    break
+            if self._stop.wait(TICK):
+                break
+        return state["ever"]
+
+    def _send(self, obj):
+        client = self._client
+        if client is None or not self.connected:
+            return False
+        try:
+            client.send(obj)
+            return True
+        except Exception as exc:
+            self.log("Watch Together: send failed ({0})".format(exc.__class__.__name__))
+            return False
+
+    def _start_heartbeat(self):
+        self._stop_heartbeat()
+        if self.timer_factory is None:
+            try:
+                from plexnet.util import RepeatingCounterTimer
+                self._heartbeat = RepeatingCounterTimer(1.0, self._heartbeat_tick)
+            except Exception:
+                import threading
+                self._heartbeat = None
+        else:
+            try:
+                self._heartbeat = self.timer_factory(1.0, self._heartbeat_tick, repeat=True)
+            except Exception:
+                self._heartbeat = None
+
+    def _stop_heartbeat(self):
+        hb, self._heartbeat = self._heartbeat, None
+        if hb:
+            try:
+                hb.cancel()
+            except Exception:
+                pass
+
+    def _heartbeat_tick(self, tick=True):
+        if self._stopping() or not self.connected:
+            self._stop_heartbeat()
+            return
+        session = self.session
+        local = self._local
+        if session is None or local is None:
+            return
+        try:
+            self._send(session.outbound_state(local, self.clock.monotonic(),
+                                              self.clock.time()))
+        except Exception as exc:
+            self.log("Watch Together: heartbeat send failed ({0})".format(exc.__class__.__name__))
+            self._stop_heartbeat()
