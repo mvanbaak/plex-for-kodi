@@ -266,3 +266,156 @@ class HubMenuTest(KodiTestCase):
         wtwin.bridge.room_clicked = calls.append
         self.run_menu(None)
         self.assertEqual(calls, [])
+
+
+class _Server(object):
+    def __init__(self, uuid):
+        self.uuid = uuid
+
+
+class _Count(object):
+    def __init__(self, value):
+        self._value = value
+
+    def asInt(self, default=0):
+        return self._value
+
+
+class Movie(object):
+    """Minimal PlexObject surface hubMenu reads for a movie/episode item."""
+
+    def __init__(self, machine="m", rating_key="1", type_="movie"):
+        self.server = _Server(machine) if machine is not None else None
+        self.ratingKey = rating_key
+        self.TYPE = type_
+        self.title = "T"
+        self.isFullyWatched = False
+        self.isWatched = False
+        self.viewedLeafCount = _Count(0)
+        self.in_progress = False
+
+
+class _Hub(object):
+    def __init__(self):
+        self.hubIdentifier = "movie.recentlyadded"
+        self.title = "Movies"
+        self.__dict__["_crossSectionSource"] = None
+        self.__dict__["_displayTitle"] = None
+
+    def getCleanHubIdentifier(self, is_home=False):
+        return "movie.recentlyadded"
+
+
+class _Section(object):
+    key = None
+
+
+class _MLI(object):
+    def __init__(self, ds):
+        self.dataSource = ds
+
+    def getProperty(self, key):
+        return None
+
+
+class _Control(object):
+    def __init__(self, mli, hub):
+        self._mli = mli
+        self.dataSource = hub
+
+    def getSelectedItem(self):
+        return self._mli
+
+
+class EntryMenuTest(KodiTestCase):
+    """The Start Watch Together / Invite entries (Review Focus 4: hidden when
+    the item has no resolvable source)."""
+
+    def setUp(self):
+        super(EntryMenuTest, self).setUp()
+        self.room = watchtogether.Room({"id": "r", "title": "Room",
+                                        "sourceUri": "", "users": []})
+        self._saved_dropdown = home.dropdown.showDropdown
+        self._saved_host = wtwin.bridge.host
+        self._saved_supervisor = wtwin.bridge.supervisor
+        self._saved_open = wtwin.InviteDialog.open
+        self._saved_confirm = HomeWindow._confirm_start_watch_together
+        # hubMenu reads cache_requests via util.getSetting; the harness has no
+        # registered default, so give it a JSON list (it is a JSON setting) to
+        # keep 'items' in <setting> from raising on None.
+        ENV.settings["cache_requests"] = "[]"
+
+    def tearDown(self):
+        home.dropdown.showDropdown = self._saved_dropdown
+        wtwin.bridge.host = self._saved_host
+        wtwin.bridge.supervisor = self._saved_supervisor
+        wtwin.InviteDialog.open = self._saved_open
+        HomeWindow._confirm_start_watch_together = self._saved_confirm
+        super(EntryMenuTest, self).tearDown()
+
+    def _capture(self, choice=None):
+        captured = []
+
+        def show(options, **kwargs):
+            captured.extend(options)
+            return {"key": choice} if choice else None
+
+        home.dropdown.showDropdown = show
+        return captured
+
+    def menu_options(self, ds, choice=None):
+        captured = self._capture(choice)
+        win = HomeWindow.__new__(HomeWindow)
+        win.hubControls = (_Control(_MLI(ds), _Hub()),)
+        win.lastSection = _Section()
+        win.hubSettings = None
+        ENV.window_props[-1]["hub.focus"] = "0"   # currentHub reads this
+        win.hubMenu(400)
+        return [o for o in captured if o]
+
+    def room_menu(self, choice=None):
+        captured = self._capture(choice)
+        win = HomeWindow.__new__(HomeWindow)
+        win.hubControls = ()
+        win._watchtogether_hub_menu(self.room)
+        return [o for o in captured if o]
+
+    def test_start_watch_together_shown_for_movie(self):
+        opts = self.menu_options(ds=Movie(machine="m", rating_key="1"))
+        assert any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_start_watch_together_hidden_without_source(self):
+        opts = self.menu_options(ds=Movie(machine=None, rating_key=None))
+        assert not any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_room_tile_menu_has_invite(self):
+        opts = self.room_menu()
+        assert any(o["key"] == "invite" for o in opts)
+
+    def test_start_calls_host_when_not_in_a_room(self):
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = None
+        HomeWindow._confirm_start_watch_together = lambda self: (_ for _ in ()).throw(
+            AssertionError("must not confirm when not in a room"))
+        ds = Movie()
+        self.menu_options(ds=ds, choice="start_watch_together")
+        self.assertEqual(hosted, [ds])
+
+    def test_start_confirms_before_leaving_a_room(self):
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = object()      # already connected to a room
+        ds = Movie()
+        HomeWindow._confirm_start_watch_together = lambda self: False
+        self.menu_options(ds=ds, choice="start_watch_together")
+        self.assertEqual(hosted, [])
+        HomeWindow._confirm_start_watch_together = lambda self: True
+        self.menu_options(ds=ds, choice="start_watch_together")
+        self.assertEqual(hosted, [ds])
+
+    def test_invite_opens_the_dialog(self):
+        opened = []
+        wtwin.InviteDialog.open = lambda *a, **k: opened.append(True)
+        self.room_menu(choice="invite")
+        self.assertEqual(opened, [True])

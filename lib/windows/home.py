@@ -3354,6 +3354,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         from . import watchtogether as wtwin
         choice = dropdown.showDropdown(
             [{'key': 'wt_join', 'display': T(35062, 'Join')},
+             {'key': 'invite', 'display': T(35082, 'Invite…')},
              {'key': 'wt_remove', 'display': T(35063, 'Remove')},
              {'key': 'wt_info', 'display': T(35064, 'Info')}],
             pos=(660, 441),
@@ -3370,6 +3371,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             command = wtwin.bridge.room_clicked(room)
             if command:
                 self.processCommand(command)
+        elif choice['key'] == 'invite':
+            wtwin.InviteDialog.open()
         elif choice['key'] == 'wt_remove':
             if self._confirm_remove_room(room):
                 wtwin.bridge.remove_room(room)
@@ -3380,6 +3383,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         button = optionsdialog.show(
             T(35063, 'Remove'),
             T(35065, 'Remove me from this room?'),
+            T(32328, 'Yes'),
+            T(32329, 'No'),
+            dialog_props=self.carriedProps
+        )
+        return button == 0
+
+    def _confirm_start_watch_together(self):
+        button = optionsdialog.show(
+            T(35053, 'Watch Together'),
+            T(35081, 'Leave the current room and start a new one?'),
             T(32328, 'Yes'),
             T(32329, 'No'),
             dialog_props=self.carriedProps
@@ -3471,6 +3484,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     options.insert(0, dropdown.SEPARATOR)
                     options.insert(1, {'key': 'start_over', 'display': T(32317, 'Play from beginning')})
                     options.insert(2, {'key': 'resume', 'display': T(32429, "Resume from {}").format(util.timeDisplay(ds.viewOffset.asInt()).lstrip('0').lstrip(':'))})
+                # Only offer hosting when the item's server/ratingKey resolve
+                # (Review Focus 4: no sourceUri otherwise).
+                if ds.server and ds.ratingKey:
+                    options.append({'key': 'start_watch_together',
+                                    'display': T(35080, 'Start Watch Together')})
 
 
             if ds.TYPE in ('episode', 'season'):
@@ -3596,6 +3614,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 ds.clearCache()
             except Exception as e:
                 util.DEBUG_LOG("Couldn't clear cache: {}", e)
+
+        elif choice["key"] == "start_watch_together":
+            from . import watchtogether as wtwin
+            # host() leaves the current room unconfirmed; ask first (mirrors
+            # room_clicked's confirm_switch).
+            if wtwin.bridge.supervisor is not None and not self._confirm_start_watch_together():
+                return
+            wtwin.bridge.host(ds)
 
     def sectionMover(self, item, action):
         def stop_moving(reset=False):

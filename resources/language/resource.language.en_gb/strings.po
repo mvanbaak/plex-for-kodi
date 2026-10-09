@@ -3472,3 +3472,15 @@ msgstr ""
 msgctxt "#35079"
 msgid "Some people could not be invited"
 msgstr ""
+
+msgctxt "#35080"
+msgid "Start Watch Together"
+msgstr ""
+
+msgctxt "#35081"
+msgid "Leave the current room and start a new one?"
+msgstr ""
+
+msgctxt "#35082"
+msgid "Invite…"
+msgstr ""
