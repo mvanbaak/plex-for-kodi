@@ -443,6 +443,10 @@ class WatchTogetherBridge(object):
                 exc.__class__.__name__))
             util.showNotification(str(exc))
             return
+        if self.supervisor is not None:
+            # switch rooms: join() early-returns an existing supervisor, which
+            # would orphan the room we just created and leave self.room stale
+            self.leave()
         self.join(room.id)
         # the lobby goes first: the video window's play() blocks, so anything
         # after _open_paused never runs until playback ends

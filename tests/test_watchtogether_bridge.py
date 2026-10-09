@@ -139,6 +139,7 @@ class FakeAPI(object):
         self.leaves = []
         self.invites = []
         self.invite_result = None
+        self.invite_fail_ids = set()
 
     def rooms(self):
         self.calls.append("rooms")
@@ -161,6 +162,8 @@ class FakeAPI(object):
         self.invites.append((room_id, list(user_ids)))
         if self.invite_result is not None:
             raise self.invite_result
+        if user_ids and user_ids[0] in self.invite_fail_ids:
+            raise watchtogether.WatchTogetherError("400")
         return watchtogether.Room(self.room_out)
 
 
@@ -381,6 +384,8 @@ class HostFlowTest(BridgeTestCase):
         self.bridge._play_item = self.opened.append
 
     def _fake_join(self, room_id):
+        if self.bridge.supervisor is not None:
+            return self.bridge.supervisor   # mirrors join()'s early return
         self.joined.append(room_id)
         self.bridge.room = watchtogether.Room(ROOM_JSON)
 
@@ -402,6 +407,23 @@ class HostFlowTest(BridgeTestCase):
     def test_host_joins_the_created_room(self):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
         self.assertEqual(self.joined, ["ca8cfezmke4"])
+
+    def test_host_leaves_the_current_room_first(self):
+        # hosting while already joined must switch, not orphan: join()
+        # early-returns an existing supervisor, leaving self.room stale
+        self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="oldroom0001"))
+        old_sup = FakeSupervisor()
+        self.bridge.supervisor = old_sup
+
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+
+        self.assertEqual(self.api.leaves, ["oldroom0001"],
+                         "must leave the current room (DELETE) before joining")
+        self.assertTrue(old_sup.stopped)
+        self.assertEqual(self.joined, ["ca8cfezmke4"],
+                         "must actually join the new room, not no-op")
+        self.assertEqual(self.bridge.room.id, "ca8cfezmke4")
+        self.assertIsNone(self.bridge.supervisor)
 
     def test_host_skips_without_a_rating_key(self):
         self.bridge.host(FakeItem(machine="m", rating_key=None, title="T"))
@@ -428,9 +450,12 @@ class HostFlowTest(BridgeTestCase):
     def test_invite_keeps_the_room_and_invites_the_rest(self):
         # §11.9: a refused target must not block the others
         self.bridge.room = watchtogether.Room(ROOM_JSON)
-        self.assertEqual(self.bridge.invite([1, 2]), [])
+        self.api.invite_fail_ids = {1}
+        self.assertEqual(self.bridge.invite([1, 2]), [1])
         self.assertEqual(self.api.invites,
-                         [("ca8cfezmke4", [1]), ("ca8cfezmke4", [2])])
+                         [("ca8cfezmke4", [1]), ("ca8cfezmke4", [2])],
+                         "both ids attempted: the loop must not abort on the "
+                         "first failure")
 
     def test_invite_without_a_room_fails_every_id(self):
         self.assertEqual(self.bridge.invite([1, 2]), [1, 2])
