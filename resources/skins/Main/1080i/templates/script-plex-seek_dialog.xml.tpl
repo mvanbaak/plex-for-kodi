@@ -832,6 +832,36 @@
             <texturenofocus{% if theme.buttons.useNoFocusColor %} colordiffuse="{{ theme.buttons.noFocusColor|default('99FFFFFF') }}"{% endif %}>script.plex/buttons/player/modern/vs10.png</texturenofocus>
             <label> </label>
         </control>
+        <control type="button" id="433">
+            <visible>!String.IsEmpty(Window(10000).Property(watchtogether.status))</visible>
+            <posx>0</posx>
+            <posy>0</posy>
+            <width min="180">auto</width>
+            <height>{{ vscale(101) }}</height>
+            <ondown>501</ondown>
+            <font>font10</font>
+            <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
+            <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
+            <textoffsetx>70</textoffsetx>
+            <textcolor>FF000000</textcolor>
+            <focusedcolor>FF000000</focusedcolor>
+            <label>$ADDON[script.plexmod 35056]</label>
+        </control>
+        <control type="button" id="434">
+            <visible>!String.IsEmpty(Window(10000).Property(watchtogether.status))</visible>
+            <posx>0</posx>
+            <posy>0</posy>
+            <width min="180">auto</width>
+            <height>{{ vscale(101) }}</height>
+            <ondown>501</ondown>
+            <font>font10</font>
+            <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
+            <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
+            <textoffsetx>70</textoffsetx>
+            <textcolor>FF000000</textcolor>
+            <focusedcolor>FF000000</focusedcolor>
+            <label>$ADDON[script.plexmod 35067]</label>
+        </control>
     </control>
 
     <control type="group">

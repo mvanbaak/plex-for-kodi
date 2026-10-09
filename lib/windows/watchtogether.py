@@ -876,3 +876,17 @@ def show_room_info(room):
     window = RoomInfoDialog.open(room=room, item=item)
     del window
     util.garbageCollect()
+
+
+def show_participants():
+    """Open the participants/leave dialog (used from the video OSD)."""
+    bridge.start()
+    window = ParticipantsDialog.open()
+    del window
+    util.garbageCollect()
+
+
+@busy.dialog()
+def leave_room():
+    """Leave the current room (used from the video OSD)."""
+    bridge.leave()

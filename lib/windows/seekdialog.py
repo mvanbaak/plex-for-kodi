@@ -128,6 +128,8 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
     OPTIONS_BUTTON_ID = 411
     SUBTITLE_BUTTON_ID = 412
     VS10_BUTTON_ID = 413
+    WT_LEAVE_BUTTON_ID = 433
+    WT_PARTICIPANTS_BUTTON_ID = 434
 
     BIG_SEEK_GROUP_ID = 500
     BIG_SEEK_LIST_ID = 501
@@ -1073,6 +1075,10 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
             self.stop()
         elif controlID == self.SETTINGS_BUTTON_ID:
             self.handleDialog(self.showSettings)
+        elif controlID == self.WT_LEAVE_BUTTON_ID:
+            self.watchTogetherLeave()
+        elif controlID == self.WT_PARTICIPANTS_BUTTON_ID:
+            self.watchTogetherParticipants()
         elif controlID == self.REPEAT_BUTTON_ID:
             self.repeatButtonClicked()
         elif controlID == self.SHUFFLE_BUTTON_ID:
@@ -1431,6 +1437,14 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 pl.refresh(force=True)
         else:
             xbmc.executebuiltin('PlayerControl(Repeat)')
+
+    def watchTogetherLeave(self):
+        from . import watchtogether as wtwin
+        wtwin.leave_room()
+
+    def watchTogetherParticipants(self):
+        from . import watchtogether as wtwin
+        wtwin.show_participants()
 
     def shuffleButtonClicked(self):
         if self.handler.playlist:
