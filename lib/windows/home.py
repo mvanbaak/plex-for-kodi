@@ -368,9 +368,11 @@ class PlaylistsSection(VirtualSection):
 playlists_section = PlaylistsSection()
 
 
-class WatchTogetherSection(object):
+class WatchTogetherSection(VirtualSection):
     """Sidebar marker for Watch Together — not a library: no hubs, no
-    library menu, no sectionChanged (guards key off `is`-identity)."""
+    library menu, no sectionChanged (guards key off `is`-identity). Inherits
+    VirtualSection only for its inert attributes (server/mappedPaths/
+    mappingBroken); showHubs() short-circuits it so it never fetches."""
     key = 'watchtogether'
     type = 'watchtogether'
     title = T(35053, 'Watch Together')
@@ -4068,6 +4070,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 mli.setBoolProperty('is.mapped.broken', section.mappingBroken)
 
     def showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):
+        # The WT sidebar entry is not a library; wake/tick/setting handlers all
+        # funnel through here with lastSection, and it must leave the grid alone.
+        if section is watchtogether_section:
+            return
         # Single choke point for all hub drawing. The lock (RLock) makes every
         # entry point — background callbacks AND the wake/tick/reinit/click paths
         # that previously bypassed it — mutually exclusive, so two _showHubs()

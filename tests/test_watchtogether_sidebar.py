@@ -32,6 +32,19 @@ class FakeSectionList(object):
         return self.item
 
 
+class FakeHubWindow(object):
+    """Just enough HomeWindow for showHubs()'s guard: any call recorded."""
+
+    def __init__(self):
+        self.calls = []
+
+    def setBoolProperty(self, *args, **kwargs):
+        self.calls.append('bool')
+
+    def setProperty(self, *args, **kwargs):
+        self.calls.append('prop')
+
+
 def home_window(item):
     win = HomeWindow.__new__(HomeWindow)
     win.sectionList = FakeSectionList(item)
@@ -70,3 +83,14 @@ class SentinelTest(KodiTestCase):
             wtwin.show = original
         self.assertEqual(opened, [1])
         self.assertIs(win.lastSection, watchtogether_section)
+
+    def test_sentinel_is_inert_for_virtual_section_consumers(self):
+        # wake/tick/path-mapping handlers read these off lastSection
+        self.assertIsInstance(watchtogether_section, home.VirtualSection)
+        self.assertFalse(watchtogether_section.mappingBroken)
+        self.assertEqual(watchtogether_section.mappedPaths, [])
+
+    def test_show_hubs_is_a_noop_for_the_sentinel(self):
+        win = FakeHubWindow()
+        HomeWindow.showHubs(win, watchtogether_section)
+        self.assertEqual(win.calls, [])
