@@ -60,13 +60,12 @@ asked.
 
 ## Follow-ups not yet squashed
 
-After `8a8ec00f` (Phase 2 exit), the following are planned as new granular
-commits on `feature/watch-together-impl`, to be squashed later per rule 3:
+After `8a8ec00f` (Phase 2 exit), these are new granular commits on
+`feature/watch-together-impl`, to be squashed later per rule 3:
 
+- `3e237459` room tile context menu — join / remove / info (done).
 - Leave / participants in the video player OSD (the OSD status label already
-  exists; add a Leave action next to it).
-- Leave / participants as a context menu on the room tile in the Home hub
-  (the WT `hubMenu` branch is currently a no-op).
+  exists; add a Leave action next to it) — **still pending**.
 
 Known caveats shipped in `8a8ec00f`: tempo catch-up only truly applies on Kodi
 21.1+ (on 21.0 `Player.SetTempo` is refused; the bridge logs once and hard-seeks),
