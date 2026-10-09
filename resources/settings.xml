@@ -118,11 +118,6 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
-                <setting id="watchtogether.enable_sidebar" type="boolean" label="35050">
-                    <level>0</level>
-                    <default>true</default>
-                    <control type="toggle"/>
-                </setting>
                 <setting id="watchtogether.auto_join_last" type="boolean" label="35051">
                     <level>0</level>
                     <default>false</default>

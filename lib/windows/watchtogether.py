@@ -771,13 +771,3 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     def leaveRoom(self):
         bridge.leave()
         self.doClose()
-
-
-def show():
-    """Sidebar entry: participants/leave when in a room; rooms are discovered
-    on the Home hub, so there is nothing to do otherwise."""
-    bridge.start()
-    if bridge.supervisor:
-        window = ParticipantsDialog.open()
-        del window
-        util.garbageCollect()

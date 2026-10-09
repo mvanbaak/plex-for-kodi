@@ -368,21 +368,6 @@ class PlaylistsSection(VirtualSection):
 playlists_section = PlaylistsSection()
 
 
-class WatchTogetherSection(VirtualSection):
-    """Sidebar marker for Watch Together — not a library: no hubs, no
-    library menu, no sectionChanged (guards key off `is`-identity). Inherits
-    VirtualSection only for its inert attributes (server/mappedPaths/
-    mappingBroken); showHubs() short-circuits it so it never fetches."""
-    key = 'watchtogether'
-    type = 'watchtogether'
-    title = T(35053, 'Watch Together')
-    locations = []
-    isMapped = False
-
-
-watchtogether_section = WatchTogetherSection()
-
-
 # item types that can be pinned to the top bar as a view of their own, per library type
 PINNABLE_TYPES = {
     'movie': ('collection',),
@@ -3158,9 +3143,6 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return
 
         section = item.dataSource
-        if section is watchtogether_section:
-            return
-
         choice = None
         if isinstance(section, PinnedTypeSection):
             choice = dropdown.showDropdown(
@@ -3646,10 +3628,6 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 self.sectionList.selectItem(self.bottomItem)
                 item = self.sectionList[self.bottomItem]
 
-        if item.dataSource is watchtogether_section:
-            # virtual entry: keep the current hubs on screen
-            return
-
         if item.getProperty('is.home'):
             self.storeLastBG()
 
@@ -4049,13 +4027,6 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     mli.setBoolProperty('is.mapped', section.isMapped)
             items.append(mli)
 
-        if util.getSetting('watchtogether.enable_sidebar', True):
-            wtmli = kodigui.ManagedListItem(watchtogether_section.title,
-                                            thumbnailImage='script.plex/home/type/channels.png',
-                                            data_source=watchtogether_section)
-            wtmli.setProperty('item', '1')
-            items.append(wtmli)
-
         self.bottomItem = len(items) - 1
 
         for x in range(len(items), 8):
@@ -4110,10 +4081,6 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 mli.setBoolProperty('is.mapped.broken', section.mappingBroken)
 
     def showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):
-        # The WT sidebar entry is not a library; wake/tick/setting handlers all
-        # funnel through here with lastSection, and it must leave the grid alone.
-        if section is watchtogether_section:
-            return
         # Single choke point for all hub drawing. The lock (RLock) makes every
         # entry point — background callbacks AND the wake/tick/reinit/click paths
         # that previously bypassed it — mutually exclusive, so two _showHubs()
@@ -4790,9 +4757,6 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.sectionChangeTimeout = None
         elif section.type in ('playlists',):
             self.processCommand(opener.handleOpen(playlists.PlaylistsWindow))
-        elif section is watchtogether_section:
-            from . import watchtogether as wtwin
-            wtwin.show()
 
     def onNewServer(self, **kwargs):
         self.showServers(from_refresh=True)
