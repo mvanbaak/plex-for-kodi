@@ -115,6 +115,11 @@ class FakePlayer(object):
         self.seek_times.append(seconds)
 
 
+class FakeVideo(object):
+    def __init__(self, rating_key):
+        self.ratingKey = rating_key
+
+
 class FakeAPI(object):
     def __init__(self, rooms=None, room=ROOM_JSON):
         self.rooms_out = rooms if rooms is not None else []
@@ -558,19 +563,15 @@ class TakeoverConfirmTest(BridgeTestCase):
         self.assertTrue(wtwin.needs_takeover_confirm(room, "999"))
 
     def test_dialog_is_used_when_prompting(self):
-        dlg = wtwin.RoomPickerDialog.__new__(wtwin.RoomPickerDialog)
-        self.player.video = True
-        dlg._playing_rating_key = lambda: "999"
+        self.player.video = FakeVideo("999")
         ENV.dialog_answers.clear()
         ENV.dialog_answers.append(False)
-        self.assertFalse(dlg._confirm_takeover(self.room()))
+        self.assertFalse(wtwin.confirm_takeover(self.room()))
         self.assertEqual(ENV.dialog_calls[-1][0], "yesno")
 
     def test_same_item_skips_the_dialog(self):
-        dlg = wtwin.RoomPickerDialog.__new__(wtwin.RoomPickerDialog)
-        self.player.video = True
-        dlg._playing_rating_key = lambda: "227117"
+        self.player.video = FakeVideo("227117")
         ENV.dialog_answers.clear()
         ENV.dialog_calls.clear()
-        self.assertTrue(dlg._confirm_takeover(self.room()))
+        self.assertTrue(wtwin.confirm_takeover(self.room()))
         self.assertEqual(ENV.dialog_calls, [])

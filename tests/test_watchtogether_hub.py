@@ -257,3 +257,30 @@ class RoomClickedTest(KodiTestCase):
         self.bridge.room = watchtogether.Room(dict(ROOM, id="other"))
         self.bridge.room_clicked(self.room)
         self.assertEqual(self.calls, [])
+
+
+class ShowEntryTest(KodiTestCase):
+    def setUp(self):
+        super(ShowEntryTest, self).setUp()
+        self.opened = []
+        self._saved_open = wtwin.ParticipantsDialog.open
+        wtwin.ParticipantsDialog.open = lambda: self.opened.append(1)
+        self._saved_start = wtwin.bridge.start
+        wtwin.bridge.start = lambda: None
+        self._saved_sup = wtwin.bridge.supervisor
+
+    def tearDown(self):
+        wtwin.ParticipantsDialog.open = self._saved_open
+        wtwin.bridge.start = self._saved_start
+        wtwin.bridge.supervisor = self._saved_sup
+        super(ShowEntryTest, self).tearDown()
+
+    def test_no_room_does_nothing(self):
+        wtwin.bridge.supervisor = None
+        wtwin.show()
+        self.assertEqual(self.opened, [])
+
+    def test_in_room_opens_participants(self):
+        wtwin.bridge.supervisor = object()
+        wtwin.show()
+        self.assertEqual(self.opened, [1])

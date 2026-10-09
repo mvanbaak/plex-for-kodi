@@ -585,85 +585,6 @@ class WatchTogetherBridge(object):
 bridge = WatchTogetherBridge()
 
 
-class RoomPickerDialog(kodigui.BaseDialog, util.CronReceiver):
-    """Pick an active room to join. Data comes from bridge.rooms_cache —
-    the bridge's lobby thread keeps it warm, refresh_rooms() re-polls now.
-    No REST on the CRON thread: it would stall every other receiver."""
-
-    xmlFile = 'script-plex-watchtogether_room_picker.xml'
-    path = util.ADDON.getAddonInfo('path')
-    theme = 'Main'
-    res = '1080i'
-    width = 1920
-    height = 1080
-
-    LIST_ID = 100
-
-    def onFirstInit(self):
-        self.roomList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
-        self._key = None
-        bridge.refresh_rooms()
-        self._sync()
-        self.setFocusId(self.LIST_ID)
-        util.CRON.registerReceiver(self)
-
-    def onClosed(self):
-        util.CRON.cancelReceiver(self)
-
-    def tick(self):
-        self._sync()
-
-    def _sync(self):
-        rooms = bridge.rooms_cache
-        self.setProperty('empty', '1' if not rooms else '0')
-        key = tuple((r.id, len(r.participants)) for r in rooms)
-        if key == self._key:
-            return                      # only rebuild on change: keep focus
-        self._key = key
-        items = [kodigui.ManagedListItem(
-            room.title,
-            util.T(35054, '{} watching').format(len(room.participants)),
-            data_source=room) for room in rooms]
-        self.roomList.reset()
-        self.roomList.addItems(items)
-
-    def onClick(self, controlID):
-        if controlID != self.LIST_ID:
-            return
-        mli = self.roomList.getSelectedItem()
-        if mli and mli.dataSource and self._confirm_takeover(mli.dataSource):
-            self.joinRoom(mli.dataSource.id)
-
-    def _playing_rating_key(self):
-        video = getattr(player.PLAYER, "video", None)
-        return str(getattr(video, "ratingKey", "") or "")
-
-    def _confirm_takeover(self, room):
-        """Joining seeks/pauses whatever is playing. If that is not the room's
-        own content, ask before taking over the user's playback (§6.4)."""
-        if not player.PLAYER.isPlayingVideo():
-            return True
-        if not needs_takeover_confirm(room, self._playing_rating_key()):
-            return True
-        return xbmcgui.Dialog().yesno(
-            util.T(35053, "Watch Together"),
-            util.T(35060, "You are already watching something else. "
-                          "Join and take over playback?"))
-
-    @busy.dialog()
-    def joinRoom(self, room_id):
-        try:
-            bridge.join(room_id)
-        except Exception as exc:
-            # WatchTogetherError for the REST outcomes, ValueError for an
-            # over-long identity — a dialog must never crash on either
-            util.DEBUG_LOG("Watch Together: join failed: {0}".format(
-                exc.__class__.__name__))
-            util.showNotification(str(exc))
-            return
-        self.doClose()
-
-
 class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     """Who is in the room + leave. Roster refreshes from REST every 15s and
     the dialog closes itself if the room ends under it (supervisor gone)."""
@@ -723,11 +644,10 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
 
 
 def show():
-    """Sidebar entry: participants when in a room, the picker otherwise."""
+    """Sidebar entry: participants/leave when in a room; rooms are discovered
+    on the Home hub, so there is nothing to do otherwise."""
     bridge.start()
     if bridge.supervisor:
         window = ParticipantsDialog.open()
-    else:
-        window = RoomPickerDialog.open()
-    del window
-    util.garbageCollect()
+        del window
+        util.garbageCollect()
