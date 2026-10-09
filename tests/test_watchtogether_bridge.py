@@ -13,7 +13,7 @@ import time
 from kodienv import ENV
 
 ENV.abort_requested = True
-from lib import syncplay, util, watchtogether  # noqa: E402
+from lib import plexpeople, syncplay, util, watchtogether  # noqa: E402
 from lib.windows import watchtogether as wtwin  # noqa: E402
 from kodi_six import xbmcgui  # noqa: E402
 
@@ -342,6 +342,77 @@ class LobbyDialogTest(KodiTestCase):
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
         self.assertEqual([i.label2 for i in d.peopleList.items],
                          ["Invited", "Invited"])
+
+
+class InviteRowsTest(KodiTestCase):
+    """invite_rows: the invite picker's list-item properties."""
+
+    def test_invite_dialog_marks_access_unknown(self):
+        rows = wtwin.invite_rows([
+            plexpeople.Invitee(1, "a", "", False),
+            plexpeople.Invitee(2, "b", "", True),
+        ])
+        self.assertEqual(rows[1]["access_unknown"], "1")
+
+    def test_invite_rows_carry_id_title_and_thumb(self):
+        rows = wtwin.invite_rows([plexpeople.Invitee(7, "b", "/t.png", False)])
+        self.assertEqual(rows, [{"id": 7, "title": "b", "thumb": "/t.png",
+                                 "access_unknown": ""}])
+
+
+class InviteDialogTest(KodiTestCase):
+    """InviteDialog: multi-select list; OK invites the selected ids."""
+
+    class FakeList(object):
+        def __init__(self):
+            self.items = []
+
+        def reset(self):
+            self.items = []
+
+        def addItems(self, items):
+            self.items += items
+
+    def dialog(self):
+        d = wtwin.InviteDialog()
+        d.peopleList = self.FakeList()
+        return d
+
+    def test_invite_dialog_syncs_rows_and_collects_selection(self):
+        d = self.dialog()
+        d._invitees = [plexpeople.Invitee(1, "a", "", False),
+                       plexpeople.Invitee(2, "b", "", True)]
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items], ["a", "b"])
+        self.assertEqual(d._selected_ids(), [])
+        d.peopleList.items[1].setProperty("selected", "1")
+        self.assertEqual(d._selected_ids(), [2])
+
+
+class InviteeSourceTest(BridgeTestCase):
+    """bridge.invitees: eligible invitees, home-only when friends are empty."""
+
+    def test_invitees_fall_back_to_home_users_when_friends_empty(self):
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 5, "title": "Home", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: []
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual([i.id for i in out], [5])
+        self.assertEqual(out[0].title, "Home")
 
 
 class AutoStartTest(BridgeTestCase):

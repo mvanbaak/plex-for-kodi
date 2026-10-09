@@ -3460,3 +3460,15 @@ msgstr ""
 msgctxt "#35076"
 msgid "Invited"
 msgstr ""
+
+msgctxt "#35077"
+msgid "Access unknown"
+msgstr ""
+
+msgctxt "#35078"
+msgid "No one to invite"
+msgstr ""
+
+msgctxt "#35079"
+msgid "Some people could not be invited"
+msgstr ""

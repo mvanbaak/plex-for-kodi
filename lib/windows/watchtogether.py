@@ -106,6 +106,22 @@ def lobby_rows(room, roster, live_ids):
     return rows
 
 
+def invite_rows(invitees):
+    """list[plexpeople.Invitee] -> list-item dicts for the invite picker.
+
+    `access_unknown` is "1" on a shared server (the sharee list cannot be
+    enumerated, so the row is labelled) and "" otherwise."""
+    rows = []
+    for invitee in invitees or []:
+        rows.append({
+            "id": invitee.id,
+            "title": invitee.title or "",
+            "thumb": invitee.thumb or "",
+            "access_unknown": "1" if invitee.access_unknown else "",
+        })
+    return rows
+
+
 class WatchTogetherRoomItem(object):
     """One room tile. Not a PlexObject — the home renderer must not treat it
     as media, so `get()` is inert and `cachable` is False."""
@@ -518,6 +534,51 @@ class WatchTogetherBridge(object):
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
         return failed
+
+    def invitees(self):
+        """Eligible invitees for the current room (plexpeople.eligible_invitees).
+
+        Home users plus friends; on a shared server every row is flagged
+        access_unknown. Degrades to home users only when the friends lookup
+        returns nothing (Review Focus 1) and never raises: the picker must
+        open whatever plex.tv answers."""
+        room = self.room
+        account = plexapp.ACCOUNT
+        if room is None or account is None:
+            return []
+        home = self._home_user_dicts(account)
+        machine_id, _ = parse_source_uri(room.source_uri)
+        owned = self._server_owned(machine_id)
+        self._ensure_people_identity()
+        try:
+            return plexpeople.eligible_invitees(
+                account.authToken, machine_id, owned, home,
+                self_id=account.ID, room_user_ids=room.user_ids)
+        except Exception:
+            # any unexpected failure still offers home users (Review Focus 1)
+            util.ERROR()
+            return [plexpeople.Invitee(h["id"], h["title"], h["thumb"], not owned)
+                    for h in home]
+
+    def _home_user_dicts(self, account):
+        """plexapp homeUsers -> the {"id", "title", "thumb"} dicts plexpeople
+        takes (its ids must be ints to dedupe against room/self ids)."""
+        out = []
+        for user in getattr(account, "homeUsers", None) or []:
+            try:
+                user_id = int(user.get("id"))
+            except (TypeError, ValueError):
+                continue
+            out.append({"id": user_id, "title": user.get("title") or "",
+                        "thumb": user.get("thumb") or ""})
+        return out
+
+    def _server_owned(self, machine_id):
+        try:
+            servers = getattr(plexapp.SERVERMANAGER, "serversByUuid", None) or {}
+            return bool(getattr(servers.get(machine_id), "owned", False))
+        except Exception:
+            return False
 
     def cancel_hosting(self):
         """Cancel hosting: leave the room (DELETE) and close the lobby."""
@@ -1137,6 +1198,85 @@ class LobbyDialog(kodigui.BaseDialog):
         if bridge.lobby is self:
             bridge.lobby = None
         kodigui.BaseDialog.doClose(self, **kw)
+
+
+class InviteDialog(kodigui.BaseDialog):
+    """Multi-select picker over the eligible invitees for the current room.
+
+    The list is a plex.tv round trip, so it is fetched off the UI thread; OK
+    calls bridge.invite(selected). A failed target is toasted — the rest are
+    still invited (bridge.invite is per-id)."""
+
+    xmlFile = 'script-plex-watchtogether_invite.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    OK_ID = 60
+    CANCEL_ID = 61
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        self._invitees = []
+        self._load()
+        self.setFocusId(self.LIST_ID)
+
+    def _load(self):
+        thread = threading.Thread(target=self._fetch, name="wt-invitees")
+        thread.daemon = True
+        thread.start()
+
+    def _fetch(self):
+        try:
+            invitees = bridge.invitees()
+        except Exception:
+            # never let a people lookup break the picker (Review Focus 1)
+            util.ERROR()
+            invitees = []
+        self._invitees = invitees
+        self._sync()
+
+    def _sync(self):
+        if getattr(self, "_closing", False):
+            return          # closed while the fetch was in flight
+        self.setBoolProperty("empty", not self._invitees)
+        self.peopleList.reset()
+        self.peopleList.addItems([
+            kodigui.ManagedListItem(
+                row["title"], "", thumbnailImage=row["thumb"],
+                data_source=row["id"],
+                properties={"access_unknown": row["access_unknown"]})
+            for row in invite_rows(self._invitees)])
+
+    def _selected_ids(self):
+        return [item.dataSource for item in self.peopleList.items
+                if item.getProperty("selected")]
+
+    def onClick(self, controlID):
+        if controlID == self.LIST_ID:
+            item = self.peopleList.getSelectedItem()
+            if item is not None:
+                item.setProperty("selected",
+                                 "" if item.getProperty("selected") else "1")
+        elif controlID == self.OK_ID:
+            self._invite()
+        elif controlID == self.CANCEL_ID:
+            self.doClose()
+
+    def _invite(self):
+        ids = self._selected_ids()
+        self.doClose()
+        if ids:
+            self._send(ids)
+
+    @busy.dialog()
+    def _send(self, ids):
+        if bridge.invite(ids):
+            util.showNotification(
+                util.T(35079, "Some people could not be invited"))
 
 
 def show_room_info(room):
