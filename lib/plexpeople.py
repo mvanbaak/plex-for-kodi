@@ -8,6 +8,7 @@ not pull in ``xbmc`` or ``lib.kodi_util``. The Kodi layer only wires it in.
 from __future__ import absolute_import
 
 import json
+import xml.etree.ElementTree as ET
 
 try:
     from urllib.request import Request, urlopen
@@ -17,6 +18,7 @@ except ImportError:  # Python 2
 
 
 GRAPHQL_URL = "https://community.plex.tv/api"
+SHARED_SERVERS_URL = "https://plex.tv/api/servers/{machine_id}/shared_servers"
 
 # PM4K identity headers. CLIENT_ID is a module attribute so the Kodi caller can
 # set it from plex.CLIENT_ID without this module importing Kodi.
@@ -88,4 +90,34 @@ def friends(token, http=None):
         out.append({"id": user_id,
                     "title": user.get("displayName", ""),
                     "thumb": user.get("avatar", "")})
+    return out
+
+
+def shared_users(token, machine_id, http=None):
+    """Return ``[{"id": int, "title": str}]`` for the users a server is shared
+    with, or ``[]`` on any failure. Owner-only: a server shared *to* the token
+    holder answers 404, which degrades to ``[]``. Never logs the token or the
+    response body."""
+    http = http or _http
+    headers = _headers(token)
+    headers["Accept"] = "application/xml"
+    status, _, content = http("GET", SHARED_SERVERS_URL.format(machine_id=machine_id),
+                              headers)
+    if not 200 <= status < 300:
+        return []
+    try:
+        root = ET.fromstring(content)
+    except (ET.ParseError, ValueError):
+        return []
+
+    out = []
+    for node in root.iter():
+        user_id = node.get("userID")
+        if user_id is None:
+            continue
+        try:
+            user_id = int(user_id)
+        except (ValueError, TypeError):
+            continue
+        out.append({"id": user_id, "title": node.get("username", "")})
     return out
