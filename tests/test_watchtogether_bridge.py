@@ -437,3 +437,35 @@ class StatusTest(BridgeTestCase):
         self.bridge.room = watchtogether.Room(ROOM_JSON)
         self.bridge.update_status()
         self.assertEqual(self.read(), "")
+
+
+class SourceUriTest(KodiTestCase):
+    """parse_source_uri: the room sourceUri -> (machine, ratingKey) mapping
+    used to start the room's content on join (§6.4)."""
+
+    def test_bare_server_uri(self):
+        self.assertEqual(
+            wtwin.parse_source_uri(
+                "server://abc123/com.plexapp.plugins.library/"
+                "library/metadata/227117"),
+            ("abc123", "227117"))
+
+    def test_provider_prefixed_uri(self):
+        self.assertEqual(
+            wtwin.parse_source_uri(
+                "provider://x/server://abc123/com.plexapp.plugins.library/"
+                "library/metadata/42"),
+            ("abc123", "42"))
+
+    def test_trailing_segments_are_ignored(self):
+        self.assertEqual(
+            wtwin.parse_source_uri(
+                "server://abc123/com.plexapp.plugins.library/"
+                "library/metadata/227117/children"),
+            ("abc123", "227117"))
+
+    def test_rejects_non_library_uri(self):
+        self.assertEqual(wtwin.parse_source_uri("http://example/x"), (None, None))
+        self.assertEqual(wtwin.parse_source_uri("server://abc/other"), (None, None))
+        self.assertEqual(wtwin.parse_source_uri(""), (None, None))
+        self.assertEqual(wtwin.parse_source_uri(None), (None, None))

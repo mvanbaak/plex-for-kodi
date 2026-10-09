@@ -13,10 +13,29 @@ import threading
 import time
 
 from kodi_six import xbmc
-from plexnet import plexapp
+from plexnet import plexapp, plexobjects
 
 from lib import plex, player, syncplay, util, watchtogether, ws
 from . import busy, kodigui
+
+
+def parse_source_uri(uri):
+    """Room sourceUri -> (machineIdentifier, ratingKey), or (None, None).
+
+    Accepts bare `server://<machine>/…/library/metadata/<key>` and the
+    provider-prefixed `provider://…/server://<machine>/…` form (§4)."""
+    if not uri or "server://" not in uri:
+        return None, None
+    rest = uri.rsplit("server://", 1)[1]
+    machine, _, path = rest.partition("/")
+    marker = "library/metadata/"
+    idx = path.find(marker)
+    if not machine or idx < 0:
+        return None, None
+    rating_key = path[idx + len(marker):].split("/")[0].split("?")[0]
+    if not rating_key:
+        return None, None
+    return machine, rating_key
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):
@@ -284,7 +303,34 @@ class WatchTogetherBridge(object):
             player.PLAYER.wt_applying_remote = 0.0
             util.setSetting("watchtogether.last_room", room_id)
             self.update_status()
-            return sup
+        # outside the lock: starting playback is heavy and must not block a
+        # concurrent leave()/on_gone()
+        self._start_room_playback(room)
+        return sup
+
+    def _start_room_playback(self, room):
+        """Guest flow (§6.4): open the room's content so the relay's State can
+        seek/play it. Best effort — a failure leaves the user to start it."""
+        if player.PLAYER.isPlayingVideo():
+            return
+        machine, rating_key = parse_source_uri(room.source_uri)
+        if not machine or not rating_key:
+            return
+        try:
+            servers = getattr(plexapp.SERVERMANAGER, "serversByUuid", None) or {}
+            server = servers.get(machine)
+            if server is None:
+                util.DEBUG_LOG("Watch Together: source server not available")
+                return
+            items = plexobjects.listItems(server,
+                                          "/library/metadata/%s" % rating_key)
+            if not items:
+                util.DEBUG_LOG("Watch Together: room item not found")
+                return
+            player.PLAYER.playVideo(items[0], resume=False)
+            util.DEBUG_LOG("Watch Together: started room playback")
+        except Exception:
+            util.ERROR()
 
     def leave(self):
         # Detach + reset under the lock, then do the blocking REST call and
