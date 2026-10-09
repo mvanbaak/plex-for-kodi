@@ -515,9 +515,9 @@ class WatchTogetherBridge(object):
 
     def _watch_room(self, room):
         """Open the room's content in the normal video player window, so space,
-        the OSD and stop all behave as usual. Playback stops -> we leave the
-        session (the official client's behaviour). Blocks until playback ends;
-        must be called on the main thread."""
+        the OSD and stop all behave as usual. Playback stops -> we end the
+        session (socket closed, peers told), but keep membership so the tile
+        can rejoin. Blocks until playback ends; must run on the main thread."""
         pl = _player()
         if pl is None or pl.isPlayingVideo():
             return
@@ -530,9 +530,19 @@ class WatchTogetherBridge(object):
         except Exception:
             util.ERROR()
         finally:
-            # playback stopped/closed: the session ends with it
             if self.supervisor is not None:
-                self.leave()
+                self.disconnect()
+
+    def disconnect(self):
+        """End the session without DELETE: closing the socket tells peers we
+        left (§5.8) but the room keeps us, so the tile can rejoin. Contrast
+        leave(), which is the explicit 'leave the room' (DELETE)."""
+        with self._join_lock:
+            sup, self.supervisor = self.supervisor, None
+            self.room = None
+            self._reset_player_link(forget_room=False)
+        if sup:
+            sup.stop()
 
     def leave(self):
         # Detach + reset under the lock, then do the blocking REST call and

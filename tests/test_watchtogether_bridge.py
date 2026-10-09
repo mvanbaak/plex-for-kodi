@@ -340,6 +340,24 @@ class LifecycleTest(BridgeTestCase):
         self.bridge.on_gone()
         self.assertEqual(self.toasts, [])
 
+    def test_disconnect_stops_without_delete_and_keeps_membership(self):
+        # stopping playback ends the session but must not DELETE, so the tile
+        # can rejoin (the official client's behaviour)
+        api = FakeAPI()
+        self.bridge.api = api
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        util.setSetting("watchtogether.last_room", "ca8cfezmke4")
+
+        self.bridge.disconnect()
+
+        self.assertEqual(api.calls, [], "disconnect must never DELETE")
+        self.assertTrue(sup.stopped)
+        self.assertIsNone(self.bridge.supervisor)
+        self.assertEqual(util.getSetting("watchtogether.last_room", ""),
+                         "ca8cfezmke4", "membership retained for rejoin")
+
     def test_stale_gone_callback_is_ignored(self):
         # a supervisor we already replaced must not tear down the new one
         current = FakeSupervisor()
