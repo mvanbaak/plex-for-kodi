@@ -40,6 +40,9 @@ asked.
    git checkout feature/watch-together-impl -- .          # bring impl's tree
    git rm -r --cached -q docs/superpowers && rm -rf docs/superpowers
    git checkout HEAD -- .gitignore                        # keep the squash .gitignore
+   # exclude the upstream templating staleness fix (48a78163, PR #299):
+   # it is a general bug fix tracked separately, not part of the WT work
+   git checkout HEAD -- lib/templating/render.py tests/test_templates.py
    git add -A
    git commit --no-gpg-sign -m "feat(watchtogether): <what changed>"
 
@@ -49,6 +52,11 @@ asked.
    uv run pytest -q
    git checkout feature/watch-together-impl
    ```
+
+   Note: the `git checkout HEAD -- lib/templating/render.py tests/test_templates.py`
+   line above only matters while `48a78163` lives on the impl branch but is
+   excluded from the squash. If PR #299 merges first (or the fix is otherwise
+   dropped from impl), that line becomes a no-op (the files already match).
 
    Then update rule 1's marker (`51bd5141` → `$MARKER`) and the "current tip"
    above.
