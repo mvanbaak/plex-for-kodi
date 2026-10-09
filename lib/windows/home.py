@@ -546,6 +546,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         With dynamic hub templating, all hubs support all display types via
         conditional visibility based on the hub.display.4XX window property.
         """
+        from . import watchtogether as wtwin
+        if identifier == wtwin.WATCHTOGETHER_HUB_ID:
+            return 'ar16x9'
+
         # Mixed content hubs (like Continue Watching) always use poster
         if identifier in self.HUBS_MIXED_CONTENT:
             return 'poster'
@@ -619,6 +623,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             'ar16x9': False,
             'with_art': False,
         }
+
+        from . import watchtogether as wtwin
+        if identifier == wtwin.WATCHTOGETHER_HUB_ID:
+            return {'with_progress': False, 'do_updates': True,
+                    'text2lines': True, 'ar16x9': True, 'with_art': False}
 
         # Watchlist/discovery hubs don't show progress
         if identifier in self.HUBS_NO_PROGRESS:
@@ -4109,6 +4118,22 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     rp[identifier] = (str(mli.dataSource.ratingKey), pos)
         return rp
 
+    def _with_watchtogether_hub(self, hubs, section):
+        """Prepend the Watch Together hub on Home. Built fresh each draw so a
+        custom hub config can neither drop nor reorder it; the hub object is
+        shared, so item states still stick."""
+        if section.key is not None or hubs is None:
+            return hubs
+        from . import watchtogether as wtwin
+        hub = wtwin.bridge.home_hub()
+        if hub is None:
+            return hubs
+        combined = HubsList([hub] + list(hubs))
+        combined.identifier = getattr(hubs, 'identifier', NO_HUB)
+        combined.lastUpdated = getattr(hubs, 'lastUpdated', 0)
+        combined.invalid = getattr(hubs, 'invalid', False)
+        return combined
+
     @busy.busy_property()
     def _showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):
         if not update:
@@ -4186,6 +4211,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if combined_hubs is not None and len(combined_hubs) > 0:
             hubs = combined_hubs
 
+        hubs = self._with_watchtogether_hub(hubs, section)
+
         # Append library's name in cross section hubs
         is_home = section.key is None
         linear_hubs = util.getSetting('hubs_linear', False)
@@ -4247,7 +4274,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             str_section_key = str(section.key) if section.key is not None else None
             is_cross_section = str_cross_source is not None and str_cross_source != str_section_key
 
-            if not is_cross_section:
+            from . import watchtogether as wtwin
+            if not is_cross_section and identifier != wtwin.WATCHTOGETHER_HUB_ID:
                 if self.isHubHidden(identifier, section.key):
                     hidden_count += 1
                     continue
@@ -4467,6 +4495,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         mli.setProperty('thumb.fallback', 'script.plex/thumb_fallbacks/movie.png')
         return mli
 
+    def createWatchTogetherListItem(self, obj, wide=False):
+        mli = kodigui.ManagedListItem(obj.title, obj.subtitle,
+                                      thumbnailImage=obj.image, data_source=obj)
+        mli.setProperty('thumb.fallback', 'script.plex/thumb_fallbacks/movie16x9.png')
+        return mli
+
     def unhandledHub(self, self2, obj, wide=False):
         util.DEBUG_LOG('Unhandled Hub item: {0}', obj.type)
 
@@ -4482,7 +4516,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         'clip': createClipListItem,
         'artist': createArtistListItem,
         'playlist': createPlaylistListItem,
-        'collection': createCollectionListItem
+        'collection': createCollectionListItem,
+        'watchtogether': createWatchTogetherListItem
     }
 
     def createListItem(self, obj, wide=False):
