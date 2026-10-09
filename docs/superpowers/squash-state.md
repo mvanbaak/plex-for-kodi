@@ -8,28 +8,31 @@ squash branch, like the spec and plan next to it.
 
 `feature/watch-together-squash` is the branch for sharing outside this repo.
 Its tree matches `feature/watch-together-impl` **except** `docs/superpowers/`
-(the whole directory: specs, plans, this file) and `.gitignore` (the squash
-branch ignores `docs/superpowers/`; the impl branch tracks it — that one-line
-diff is expected and is the only non-`docs/superpowers/` difference).
+(the whole directory: specs, plans, this file), `.gitignore` (the squash branch
+ignores `docs/superpowers/`; the impl branch tracks it), and the excluded
+templating staleness fix (`lib/templating/render.py`, `tests/test_templates.py`
+— see rule 3). All three differences are expected.
 
 Base `2707bbe7` (`1.14.1`), then:
 
 - `27f7dda8` chore: uv dev tooling and Watch Together protocol research
 - `198cf1a3` feat(watchtogether): Phase 1 protocol library
-- `8a8ec00f` feat(watchtogether): Phase 2 Kodi UI integration  ← current tip
+- `8a8ec00f` feat(watchtogether): Phase 2 Kodi UI integration
+- `84e9d3a8` feat(watchtogether): hub room menu, OSD controls, dialogs  ← current tip
 
 **Not pushed.** The squash branch is local only; push it only when explicitly
 asked.
 
 ## Rules for future squashes
 
-1. **Everything up to `51bd5141` on `feature/watch-together-impl` is already
-   squashed** (into `8a8ec00f`). Do not re-squash those commits. The granular
-   history lives on the impl branch only and stays there.
+1. **Everything up to `686e9b57` on `feature/watch-together-impl` is already
+   squashed** (into the squash branch: `8a8ec00f`, then `84e9d3a8`). Do not
+   re-squash those commits. The granular history lives on the impl branch only
+   and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
-   `51bd5141`** and append the result to `feature/watch-together-squash` as a
+   `686e9b57`** and append the result to `feature/watch-together-squash` as a
    single commit. Recipe (run from the repo root):
 
    ```bash
@@ -48,7 +51,8 @@ asked.
 
    # verify (see rule 4)
    git diff --name-only feature/watch-together-squash feature/watch-together-impl \
-       | grep -v '^docs/superpowers/' || echo "only superpowers differs"
+       | grep -vE '^(docs/superpowers/|lib/templating/render.py|tests/test_templates.py)$' \
+       || echo "only superpowers + the excluded templating fix differ"
    uv run pytest -q
    git checkout feature/watch-together-impl
    ```
@@ -58,11 +62,12 @@ asked.
    excluded from the squash. If PR #299 merges first (or the fix is otherwise
    dropped from impl), that line becomes a no-op (the files already match).
 
-   Then update rule 1's marker (`51bd5141` → `$MARKER`) and the "current tip"
-   above.
+   Then update rule 1's marker (to `$MARKER`) and the "current tip" above.
 4. Verification after every squash: the command in the recipe prints
-   **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
-   Baselines: 805 passed at Phase 1 exit, **945 passed at Phase 2 exit**.
+   **only `.gitignore`** (plus the two excluded templating files, while
+   `48a78163` stays out of the squash), and `uv run pytest -q` is green on the
+   squash branch. Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit,
+   **956 at the `84e9d3a8` squash**.
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
    branch — token hygiene rules from the spec apply: no token values anywhere.
 6. When the squash branch is pushed and a PR is opened upstream
@@ -72,18 +77,20 @@ asked.
 
 ## Follow-ups not yet squashed
 
-After `8a8ec00f` (Phase 2 exit), these are new granular commits on
-`feature/watch-together-impl`, to be squashed later per rule 3:
+Squashed into `84e9d3a8` (impl marker `686e9b57`): room tile context menu
+(`3e237459`), Leave + Participants OSD buttons (`505ef628`), THEME_VERSION bump
+(`bcb7802e`), one OSD icon button (`259d87fa`), teardown diagnostics
+(`f2d9322a`), participants dialog OK/Leave + avatars (`aaafeb80`), OSD icon size
+(`6b9b4395`). Nothing outstanding.
 
-- `3e237459` room tile context menu — join / remove / info (done).
-- `505ef628` Leave + Participants buttons in the video OSD (done).
-- `48a78163` templating staleness fix — cherry-picked to a separate branch
-  (`fix/template-staleness`, PR #299 against `pannal:develop_kodi21`); it is
-  NOT part of the WT squash.
+Still separate: the templating staleness fix (`48a78163`) — cherry-picked to
+`fix/template-staleness` (PR #299 against `pannal:develop_kodi21`); NOT part of
+the WT squash.
 
-Known caveats shipped in `8a8ec00f`: tempo catch-up only truly applies on Kodi
-21.1+ (on 21.0 `Player.SetTempo` is refused; the bridge logs once and hard-seeks),
-and auto-join rejoins the session but does not auto-start playback.
+Known caveats shipped on the squash branch (`8a8ec00f`, `84e9d3a8`): tempo
+catch-up only truly applies on Kodi 21.1+ (on 21.0 `Player.SetTempo` is refused;
+the bridge logs once and hard-seeks), and auto-join rejoins the session but does
+not auto-start playback.
 
 Join-time startup stutter (observed live, left as-is): joining a room opens the
 video at offset 0, then the first relay `State` makes the bridge seek to the
