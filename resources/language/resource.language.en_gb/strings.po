@@ -3436,3 +3436,27 @@ msgstr ""
 msgctxt "#35070"
 msgid "Leave this Watch Together room?"
 msgstr ""
+
+msgctxt "#35071"
+msgid "Invite"
+msgstr ""
+
+msgctxt "#35072"
+msgid "Start"
+msgstr ""
+
+msgctxt "#35073"
+msgid "Cancel"
+msgstr ""
+
+msgctxt "#35074"
+msgid "Waiting for the host…"
+msgstr ""
+
+msgctxt "#35075"
+msgid "Ready"
+msgstr ""
+
+msgctxt "#35076"
+msgid "Invited"
+msgstr ""

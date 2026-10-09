@@ -190,6 +190,14 @@ class FakeLobby(object):
         self.closed = True
 
 
+class FakeRoom(object):
+    """Minimal room surface the lobby dialog reads: participants + title."""
+
+    def __init__(self, users=None, title="Room"):
+        self.participants = users or []
+        self.title = title
+
+
 class BridgeTestCase(KodiTestCase):
     def setUp(self):
         super(BridgeTestCase, self).setUp()
@@ -300,6 +308,40 @@ class LobbyRowsTest(KodiTestCase):
         rows = wtwin.lobby_rows(room, {}, live_ids=set())
         self.assertEqual(rows, [{"title": "u1", "thumb": "/t.png",
                                  "status": "Invited"}])
+
+
+class LobbyDialogTest(KodiTestCase):
+    """LobbyDialog: host mode offers Start/Cancel/Invite; guest is read-only."""
+
+    def test_lobby_dialog_read_only_hides_start(self):
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                              live_ids=set(), host=False)
+        self.assertIs(d.is_host, False)   # dialog hides Start/Cancel in guest mode
+
+    def test_lobby_dialog_host_mode(self):
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                              live_ids=set(), host=True)
+        self.assertIs(d.is_host, True)
+
+    def test_lobby_dialog_syncs_title_and_status_rows(self):
+        room = FakeRoom(users=[{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
+
+        class FakeList(object):
+            def __init__(self):
+                self.items = []
+
+            def reset(self):
+                self.items = []
+
+            def addItems(self, items):
+                self.items += items
+
+        d = wtwin.LobbyDialog(room=room, roster={}, live_ids=set(), host=True)
+        d.peopleList = FakeList()
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
+        self.assertEqual([i.label2 for i in d.peopleList.items],
+                         ["Invited", "Invited"])
 
 
 class AutoStartTest(BridgeTestCase):

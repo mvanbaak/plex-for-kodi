@@ -100,7 +100,8 @@ def lobby_rows(room, roster, live_ids):
         rows.append({
             "title": user.get("title") or user.get("username") or "",
             "thumb": user.get("thumb") or "",
-            "status": "Ready" if str(user.get("id")) in ready else "Invited",
+            "status": util.T(35075, "Ready") if str(user.get("id")) in ready
+                      else util.T(35076, "Invited"),
         })
     return rows
 
@@ -412,7 +413,8 @@ class WatchTogetherBridge(object):
 
     def start_playback(self):
         """Start the room: unpause self (§6.4). The local-change path then
-        broadcasts paused:false, so guests unpause via _apply_remote."""
+        broadcasts paused:false, so guests unpause via _apply_remote. Closes
+        the lobby (manual Start and auto-start both land here)."""
         pl = _player()
         if pl is not None:
             pl.control("play")
@@ -420,6 +422,7 @@ class WatchTogetherBridge(object):
         if sup is not None:
             sup.send_now()
         self._started = True
+        self._close_lobby()
 
     # -- host flow -----------------------------------------------------------
 
@@ -460,9 +463,14 @@ class WatchTogetherBridge(object):
         plexpeople.VERSION = util.ADDON.getAddonInfo("version")
 
     def _open_lobby(self):
-        """Show the host lobby over the video. Placeholder: Task 8 opens
-        LobbyDialog(host=True) and stores it on self.lobby."""
-        self.lobby = None
+        """Show the host lobby over the video. Non-modal (create, not open):
+        videoplayer.play() blocks right after, so a modal dialog would
+        deadlock."""
+        sup = self.supervisor
+        roster = sup.session.roster \
+            if sup is not None and sup.session is not None else {}
+        self.lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
+                                        live_ids=self._live_user_ids(), host=True)
 
     def _close_lobby(self):
         lobby, self.lobby = self.lobby, None
@@ -1046,6 +1054,86 @@ class RoomInfoDialog(kodigui.BaseDialog):
     def onClick(self, controlID):
         if controlID == self.CLOSE_ID:
             self.doClose()
+
+
+class LobbyDialog(kodigui.BaseDialog):
+    """The Watch Together lobby: media title, participant readiness, and the
+    host's Start/Cancel/Invite — or a guest's read-only view with Leave.
+
+    Shown non-modally via create(): host() shows it right before
+    videoplayer.play() blocks, so a modal open would deadlock. It refreshes
+    itself on a peer's readiness change (bridge._on_ready) and drops the
+    bridge's reference when it closes."""
+
+    xmlFile = 'script-plex-watchtogether_lobby.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    INVITE_ID = 60
+    START_ID = 61
+    CANCEL_ID = 62
+    LEAVE_ID = 63
+
+    def __init__(self, *args, **kwargs):
+        kodigui.BaseDialog.__init__(self, *args, **kwargs)
+        self.room = kwargs.get('room')
+        self.roster = kwargs.get('roster') or {}
+        self.live_ids = kwargs.get('live_ids') or set()
+        self.is_host = bool(kwargs.get('host'))
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        room = self.room
+        self.setProperty('watching', room.title if room else '')
+        self.setBoolProperty('is_host', self.is_host)
+        self._sync()
+        self.setFocusId(self.START_ID if self.is_host else self.LEAVE_ID)
+
+    def refresh(self):
+        """Re-read the roster and repaint (called from the supervisor thread
+        on a peer's readiness change — never raise)."""
+        if not getattr(self, 'peopleList', None):
+            return          # window not initialised yet: nothing to repaint
+        sup = bridge.supervisor
+        if sup is not None and sup.session is not None:
+            self.roster = sup.session.roster
+        self.live_ids = bridge._live_user_ids()
+        self._sync()
+
+    def _sync(self):
+        items = [kodigui.ManagedListItem(row['title'], row['status'],
+                                         thumbnailImage=row['thumb'],
+                                         data_source=self.room)
+                 for row in lobby_rows(self.room, self.roster, self.live_ids)]
+        self.peopleList.reset()
+        self.peopleList.addItems(items)
+
+    def onClick(self, controlID):
+        if controlID == self.INVITE_ID:
+            self._invite()
+        elif controlID == self.START_ID:
+            bridge.start_playback()     # closes the lobby
+        elif controlID == self.CANCEL_ID:
+            bridge.cancel_hosting()     # leave (DELETE) + close
+        elif controlID == self.LEAVE_ID:
+            bridge.leave()
+            self.doClose()
+
+    def _invite(self):
+        # Task 9 provides InviteDialog; open it when present so the lobby does
+        # not hard-depend on it landing first.
+        invite_dialog = globals().get('InviteDialog')
+        if invite_dialog is not None:
+            invite_dialog.open()
+
+    def doClose(self, **kw):
+        if bridge.lobby is self:
+            bridge.lobby = None
+        kodigui.BaseDialog.doClose(self, **kw)
 
 
 def show_room_info(room):
