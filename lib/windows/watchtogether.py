@@ -196,6 +196,14 @@ class WatchTogetherBridge(object):
         if key != self._rooms_key:
             self._rooms_key = key
             self.rooms_version += 1
+        live = set()
+        for room in rooms:
+            live.add(room.id)
+            if room.id not in self.room_art:
+                self.room_art[room.id] = self._resolve_room_art(room)
+        for room_id in list(self.room_art):
+            if room_id not in live:
+                del self.room_art[room_id]
         current = set(r.id for r in rooms)
         if not self._rooms_seeded:
             # first paint: remember, never toast what was already there
@@ -234,6 +242,29 @@ class WatchTogetherBridge(object):
         thread.start()
 
     # -- home hub ------------------------------------------------------------
+
+    def _resolve_room_art(self, room):
+        """16:9 art for a room, resolved from sourceUri against its source
+        server. Never raises: any failure yields the placeholder."""
+        machine, key = parse_source_uri(room.source_uri)
+        if not machine or not key:
+            return WATCHTOGETHER_PLACEHOLDER
+        try:
+            servers = getattr(plexapp.SERVERMANAGER, "serversByUuid", None) or {}
+            server = servers.get(machine)
+            if server is None:
+                return WATCHTOGETHER_PLACEHOLDER
+            items = plexobjects.listItems(server, "/library/metadata/%s" % key)
+            if not items:
+                return WATCHTOGETHER_PLACEHOLDER
+            item = items[0]
+            art = item.defaultThumb if getattr(item, "type", None) == "episode" \
+                else item.defaultArt
+            if not art:
+                art = item.defaultThumb
+            return art.asTranscodedImageURL(532, 299)
+        except Exception:
+            return WATCHTOGETHER_PLACEHOLDER
 
     def _build_room_items(self):
         return [WatchTogetherRoomItem(r, self.room_art.get(r.id))

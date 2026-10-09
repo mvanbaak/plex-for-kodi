@@ -137,3 +137,69 @@ class _StubAPI(object):
 
     def leave(self, room_id):
         pass
+
+
+class _FakeArt(object):
+    def __init__(self, url):
+        self.url = url
+
+    def asTranscodedImageURL(self, w, h):
+        return "{0}?w={1}&h={2}".format(self.url, w, h)
+
+
+class _FakeItem(object):
+    def __init__(self, type_, thumb=None, art=None):
+        self.type = type_
+        self.defaultThumb = thumb
+        self.defaultArt = art
+
+
+class ArtResolveTest(KodiTestCase):
+    def setUp(self):
+        super(ArtResolveTest, self).setUp()
+        self.bridge = wtwin.WatchTogetherBridge()
+
+    def _patch(self, server_items, server_present=True):
+        import lib.windows.watchtogether as wt
+        self._saved_list = wt.plexobjects.listItems
+        self._saved_sm = wt.plexapp.SERVERMANAGER
+        wt.plexobjects.listItems = lambda server, path: server_items
+
+        class _SM(object):
+            serversByUuid = {"abc": object()} if server_present else {}
+        wt.plexapp.SERVERMANAGER = _SM()
+
+    def tearDown(self):
+        import lib.windows.watchtogether as wt
+        wt.plexobjects.listItems = self._saved_list
+        wt.plexapp.SERVERMANAGER = self._saved_sm
+        super(ArtResolveTest, self).tearDown()
+
+    def test_episode_uses_thumb(self):
+        self._patch([_FakeItem("episode", thumb=_FakeArt("t"), art=_FakeArt("a"))])
+        url = self.bridge._resolve_room_art(watchtogether.Room(ROOM))
+        self.assertIn("t?", url)
+
+    def test_movie_uses_art(self):
+        self._patch([_FakeItem("movie", thumb=_FakeArt("t"), art=_FakeArt("a"))])
+        url = self.bridge._resolve_room_art(watchtogether.Room(ROOM))
+        self.assertIn("a?", url)
+
+    def test_missing_server_is_placeholder(self):
+        self._patch([], server_present=False)
+        self.assertEqual(self.bridge._resolve_room_art(watchtogether.Room(ROOM)),
+                         wtwin.WATCHTOGETHER_PLACEHOLDER)
+
+    def test_no_item_is_placeholder(self):
+        self._patch([])
+        self.assertEqual(self.bridge._resolve_room_art(watchtogether.Room(ROOM)),
+                         wtwin.WATCHTOGETHER_PLACEHOLDER)
+
+    def test_poll_caches_and_prunes_art(self):
+        self._patch([_FakeItem("episode", thumb=_FakeArt("t"))])
+        self.bridge.api = _StubAPI([ROOM])
+        self.bridge._poll_rooms()
+        self.assertIn(ROOM["id"], self.bridge.room_art)
+        self.bridge.api = _StubAPI([])
+        self.bridge._poll_rooms()
+        self.assertEqual(self.bridge.room_art, {})
