@@ -235,6 +235,12 @@ class SessionSupervisor(object):
         calls this on a local seek; exactly one tick carries doSeek: true."""
         self._seek_pending = True
 
+    def send_now(self):
+        """Send the current snapshot immediately. A local play/pause/seek must
+        reach the relay before the next 1 Hz beat, or a peer's in-flight State
+        reverts it (last-setBy wins, but only once ours lands). Thread-safe."""
+        self._send_state()
+
     def set_ready(self, ready, manually=False):
         """Report readiness, but only when it changes (§6.4). `manually` marks
         a user-pressed play, which always goes out even if the value matches."""

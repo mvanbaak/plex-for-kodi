@@ -219,6 +219,11 @@ class _FakeBusyWindow(object):
         return cls()
 
 
+class _Playing(object):
+    def isPlayingVideo(self):
+        return True
+
+
 class RoomClickedTest(KodiTestCase):
     def setUp(self):
         super(RoomClickedTest, self).setUp()
@@ -257,11 +262,28 @@ class RoomClickedTest(KodiTestCase):
         self.bridge.room_clicked(self.room)
         self.assertEqual(self.calls, [])
 
-    def test_same_room_opens_participants(self):
+    def test_same_room_while_watching_opens_participants(self):
         self.bridge.supervisor = object()
         self.bridge.room = self.room
-        self.bridge.room_clicked(self.room)
+        saved = wtwin._player
+        wtwin._player = lambda: _Playing()
+        try:
+            self.bridge.room_clicked(self.room)
+        finally:
+            wtwin._player = saved
         self.assertEqual(self.calls, [("participants",)])
+
+    def test_same_room_not_playing_starts_watching(self):
+        self.bridge.supervisor = object()
+        self.bridge.room = self.room
+        watched = []
+        saved = self.bridge._watch_room
+        self.bridge._watch_room = watched.append
+        try:
+            self.bridge.room_clicked(self.room)
+        finally:
+            self.bridge._watch_room = saved
+        self.assertEqual(watched, [self.room])
 
     def test_switch_confirmed_leaves_then_joins(self):
         wtwin.confirm_switch = lambda: True

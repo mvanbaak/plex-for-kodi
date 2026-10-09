@@ -11,7 +11,6 @@ from __future__ import absolute_import
 
 import threading
 import time
-import uuid
 
 from kodi_six import xbmc, xbmcgui
 from plexnet import plexapp, plexlibrary, plexobjects
@@ -41,6 +40,7 @@ def parse_source_uri(uri):
 
 WATCHTOGETHER_HUB_ID = "watchtogether.rooms"
 WATCHTOGETHER_PLACEHOLDER = "script.plex/thumb_fallbacks/movie16x9.png"
+LOCAL_CHANGE_GRACE = 1.5   # seconds to hold off remote applies after a local change
 
 
 def participant_names(users):
@@ -57,6 +57,12 @@ def participant_names(users):
     if len(names) == 1:
         return names[0]
     return "{0} and {1}".format(", ".join(names[:-1]), names[-1])
+
+
+def _player():
+    """The live PlexPlayer, or None during addon shutdown (player.PLAYER is
+    deleted by player.shutdown() while daemon threads may still tick)."""
+    return getattr(player, "PLAYER", None)
 
 
 class WatchTogetherRoomItem(object):
@@ -169,6 +175,7 @@ class WatchTogetherBridge(object):
         self._stop = threading.Event()
         self._join_lock = threading.Lock()
         self._auto_join_done = False
+        self._local_change_at = 0.0
         self._was_connected = False
 
     # -- startup ------------------------------------------------------------
@@ -305,24 +312,26 @@ class WatchTogetherBridge(object):
         """Feed the supervisor's snapshot at 1 Hz (§5.5). The supervisor sends;
         this only updates what it will send."""
         sup = self.supervisor
-        if sup is None:
+        pl = _player()
+        if sup is None or pl is None:
             return
         # isPlayingVideo, not isPlaying: theme music runs through this same
         # player. We still must emit a State while in the lobby (audio or no
         # playback) or the relay reaps the silent socket in ~13 s (§5.8) — but
         # it is an idle video state, never the theme's position.
-        if not player.PLAYER.isPlayingVideo():
+        if not pl.isPlayingVideo():
             sup.outbound_state({"position": 0, "paused": True, "doSeek": False})
             return
         sup.outbound_state({
-            "position": int(player.PLAYER.getTime() or 0),
+            "position": int(pl.getTime() or 0),
             "paused": bool(xbmc.getCondVisibility("Player.Paused")),
             "doSeek": False,
         })
 
     def _update_ready(self, sup):
         """§6.4: ready when video is loaded and not still buffering."""
-        ready = bool(player.PLAYER.isPlayingVideo()
+        pl = _player()
+        ready = bool(pl is not None and pl.isPlayingVideo()
                      and not xbmc.getCondVisibility("Player.Caching"))
         sup.set_ready(ready)
 
@@ -336,7 +345,13 @@ class WatchTogetherBridge(object):
         if kind == "play" and sup is not None:
             # the user pressed play: that is a manual readiness (§6.4)
             sup.set_ready(True, manually=True)
+        # a local change must win: send it now and hold off incoming states
+        # briefly, or a peer's older State reverts it (last-setBy-wins, but
+        # only after ours lands)
+        self._local_change_at = time.monotonic()
         self.push_local()
+        if sup is not None:
+            sup.send_now()
 
     # -- relay -> kodi ---------------------------------------------------------
 
@@ -356,12 +371,15 @@ class WatchTogetherBridge(object):
         session = sup.session
         if session is None or not sup.connected:
             return
+        if time.monotonic() - self._local_change_at < LOCAL_CHANGE_GRACE:
+            return          # our own change is in flight; don't be reverted
+        pl = _player()
         # §6.3 foreground/background: v1 approximates "foreground" with "video
         # playing" (no ad-break sync — an explicit v1 non-goal). The lobby and
         # theme-music cases stay background and ignore the relay's playstate.
-        if not player.PLAYER.isPlayingVideo():
+        if pl is None or not pl.isPlayingVideo():
             return
-        local_pos = player.PLAYER.getTime() or 0.0
+        local_pos = pl.getTime() or 0.0
         action = syncplay.sync_action(local_pos, remote.get("position", 0.0),
                                       remote.get("paused", True),
                                       session.latency.forward_delay)
@@ -372,17 +390,17 @@ class WatchTogetherBridge(object):
         # States arrive ~1 Hz, so arming on every frame would keep the gate
         # closed and swallow every genuine local event (design §Echo)
         if want_paused is not None and want_paused != is_paused:
-            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
-            player.PLAYER.control("pause" if want_paused else "play")
+            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.control("pause" if want_paused else "play")
             applied = True
         if remote.get("doSeek"):
             # §5.6: a peer's explicit seek command — apply even inside the
             # drift band, where sync_action would stay put
-            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
+            pl.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(remote.get("position", 0.0))
             applied = True
         elif action and action[0] == "seek":
-            player.PLAYER.wt_applying_remote = time.monotonic() + 2.0
+            pl.wt_applying_remote = time.monotonic() + 2.0
             self._seek_to(action[1])
             applied = True
         elif action and action[0] == "tempo":
@@ -397,11 +415,14 @@ class WatchTogetherBridge(object):
         path — transcodes, bookkeeping); plain seekTime otherwise. During video
         playback the dialog is created up front, so the fallback is the edge."""
         target = max(target, 0)
-        dialog = getattr(getattr(player.PLAYER, "handler", None), "dialog", None)
+        pl = _player()
+        if pl is None:
+            return
+        dialog = getattr(getattr(pl, "handler", None), "dialog", None)
         if dialog:
             dialog.doSeek(int(target * 1000))
         else:
-            player.PLAYER.seekTime(target)
+            pl.seekTime(target)
 
     # -- supervisor callbacks ---------------------------------------------------
 
@@ -463,42 +484,55 @@ class WatchTogetherBridge(object):
             self.room = room
             self.supervisor = sup
             self._was_connected = False
-            player.PLAYER.wt_broadcast = self.on_local_change
-            player.PLAYER.wt_applying_remote = 0.0
+            pl = _player()
+            if pl is not None:
+                pl.wt_broadcast = self.on_local_change
+                pl.wt_applying_remote = 0.0
             util.setSetting("watchtogether.last_room", room_id)
             self.update_status()
-        # outside the lock: starting playback is heavy and must not block a
-        # concurrent leave()/on_gone()
-        self._start_room_playback(room, sup)
         return sup
 
-    def _start_room_playback(self, room, sup):
-        """Guest flow (§6.4): open the room's content so the relay's State can
-        seek/play it. Best effort — a failure leaves the user to start it."""
-        if self.supervisor is not sup:
-            return                      # left or rejoined while we fetched
-        if player.PLAYER.isPlayingVideo():
-            return
+    def _room_media_item(self, room):
+        """Resolve the room's sourceUri to a playable, or None (best effort)."""
         machine, rating_key = parse_source_uri(room.source_uri)
         if not machine or not rating_key:
-            return
+            return None
         try:
             servers = getattr(plexapp.SERVERMANAGER, "serversByUuid", None) or {}
             server = servers.get(machine)
             if server is None:
                 util.DEBUG_LOG("Watch Together: source server not available")
-                return
+                return None
             items = plexobjects.listItems(server,
                                           "/library/metadata/%s" % rating_key)
             if not items:
                 util.DEBUG_LOG("Watch Together: room item not found")
-                return
-            player.PLAYER.playVideo(items[0], resume=False,
-                                    session_id=str(uuid.uuid4()))
-            player.PLAYER.control("pause")   # §6.4: join paused, relay seeks
-            util.DEBUG_LOG("Watch Together: started room playback")
+                return None
+            return items[0]
         except Exception:
             util.ERROR()
+            return None
+
+    def _watch_room(self, room):
+        """Open the room's content in the normal video player window, so space,
+        the OSD and stop all behave as usual. Playback stops -> we leave the
+        session (the official client's behaviour). Blocks until playback ends;
+        must be called on the main thread."""
+        pl = _player()
+        if pl is None or pl.isPlayingVideo():
+            return
+        item = self._room_media_item(room)
+        if item is None:
+            return
+        from . import videoplayer
+        try:
+            videoplayer.play(video=item)
+        except Exception:
+            util.ERROR()
+        finally:
+            # playback stopped/closed: the session ends with it
+            if self.supervisor is not None:
+                self.leave()
 
     def leave(self):
         # Detach + reset under the lock, then do the blocking REST call and
@@ -521,10 +555,14 @@ class WatchTogetherBridge(object):
             sup.stop()
 
     def room_clicked(self, room):
-        """Hub tile click: join, switch, or open participants for this room."""
+        """Hub tile click: join and watch, switch, or (already watching) open
+        participants. Playback stops -> leave, so a later click rejoins."""
         sup = self.supervisor
         if sup is not None and self.room is not None and self.room.id == room.id:
-            ParticipantsDialog.open()
+            if _player() is not None and _player().isPlayingVideo():
+                ParticipantsDialog.open()
+            else:
+                self._watch_room(room)      # in the room but not watching
             return
         leave_first = sup is not None
         if leave_first:
@@ -538,6 +576,8 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: join failed: {0}".format(
                 exc.__class__.__name__))
             util.showNotification(str(exc))
+            return
+        self._watch_room(room)
 
     @busy.dialog()
     def _join_or_switch(self, room_id, leave_first):
@@ -619,6 +659,9 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
         self._ticks = 0
         bridge.refresh_room()
         self._sync()
+        # the roster can be empty; focus the Leave button so the dialog is
+        # never a dead end
+        self.setFocusId(self.LEAVE_ID)
         util.CRON.registerReceiver(self)
 
     def onClosed(self):

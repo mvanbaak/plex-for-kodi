@@ -62,6 +62,9 @@ class FakeSupervisor(object):
     def request_seek(self):
         self.seek_requested = True
 
+    def send_now(self):
+        self.sent_now = getattr(self, "sent_now", 0) + 1
+
     def set_ready(self, ready, manually=False):
         self.ready = ready
         self.ready_manual = manually
@@ -480,31 +483,45 @@ class StatusTest(BridgeTestCase):
 
 
 class PlaybackStartTest(BridgeTestCase):
-    """_start_room_playback: the guarded guest join-playback (§6.4)."""
+    """_watch_room / _room_media_item: the guarded guest join-playback (§6.4)."""
 
     def room(self):
         return watchtogether.Room(ROOM_JSON)
 
-    def test_skips_when_the_supervisor_was_replaced(self):
-        stale = FakeSupervisor()
-        self.bridge.supervisor = FakeSupervisor()   # a different one
-        self.bridge._start_room_playback(self.room(), stale)
-        self.assertEqual(self.player.videos, [])
-
-    def test_skips_when_a_video_is_already_playing(self):
-        sup = FakeSupervisor()
-        self.bridge.supervisor = sup
+    def test_watch_room_skips_when_a_video_is_already_playing(self):
         self.player.video = True
-        self.bridge._start_room_playback(self.room(), sup)
+        self.bridge._watch_room(self.room())   # must not start a new playback
         self.assertEqual(self.player.videos, [])
 
-    def test_no_source_server_leaves_playback_alone(self):
-        sup = FakeSupervisor()
-        self.bridge.supervisor = sup
+    def test_watch_room_without_a_source_server_does_nothing(self):
         self.player.video = False
         # SERVERMANAGER is absent in tests: resolve yields nothing, no crash
-        self.bridge._start_room_playback(self.room(), sup)
+        self.bridge._watch_room(self.room())
         self.assertEqual(self.player.videos, [])
+
+    def test_room_media_item_returns_none_without_a_source_server(self):
+        self.assertIsNone(self.bridge._room_media_item(self.room()))
+
+
+class LocalChangeGraceTest(BridgeTestCase):
+    def test_a_local_change_holds_off_a_peer_state_that_would_revert_it(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_local_change("pause")
+        self.assertEqual(sup.sent_now, 1, "a local change is sent immediately")
+        self.bridge.on_state({"position": self.player.position + 5,
+                              "paused": False, "doSeek": False,
+                              "setBy": "other-identity"})
+        self.assertEqual(self.player.controls, [], "must not be reverted")
+
+    def test_remote_applies_resume_after_the_grace(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_local_change("pause")
+        self.bridge._local_change_at = 0.0     # grace expired
+        self.bridge.on_state({"position": self.player.position,
+                              "paused": True, "doSeek": False,
+                              "setBy": "other-identity"})
+        self.assertEqual(self.player.controls, ["pause"])
 
 
 class SourceUriTest(KodiTestCase):
