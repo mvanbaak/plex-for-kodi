@@ -137,6 +137,7 @@ TICK = 0.1
 POLL = 15.0
 HEARTBEAT = 1.0   # §5.5: one State per second, the relay's liveness gate
 STABLE = 10.0     # a connection up this long counts as healthy: reset backoff
+SYNC_HOLD = 10.0  # hold outbound States until synced (well under the 13s reap)
 
 
 class SessionSupervisor(object):
@@ -192,6 +193,8 @@ class SessionSupervisor(object):
         self._seek_pending = False
         self._ready = False         # §6.4 readiness; re-announced per connection
         self._ready_sent = None
+        self._synced = False        # hold States until the first room State is applied
+        self._opened_at = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -240,6 +243,11 @@ class SessionSupervisor(object):
         reach the relay before the next 1 Hz beat, or a peer's in-flight State
         reverts it (last-setBy wins, but only once ours lands). Thread-safe."""
         self._send_state()
+
+    def mark_synced(self):
+        """The bridge has applied the room's position: our own position is now
+        meaningful and may be published."""
+        self._synced = True
 
     def set_ready(self, ready, manually=False):
         """Report readiness, but only when it changes (§6.4). `manually` marks
@@ -344,6 +352,8 @@ class SessionSupervisor(object):
         def on_open():
             state["open"] = state["ever"] = True
             state["opened_at"] = self.clock.monotonic()
+            self._opened_at = state["opened_at"]
+            self._synced = False
             self.connected = True
             from . import syncplay
             self._send(syncplay.hello(self.room.id, self.identity))
@@ -447,6 +457,15 @@ class SessionSupervisor(object):
         client = self._client
         if session is None or client is None or not self.connected:
             return
+        # Hold the first States: publishing our pre-sync position (a freshly
+        # started video at ~0) would make it the room's position and drag
+        # everyone to the start. Release once the bridge has applied the room's
+        # position, or after SYNC_HOLD so a session that never starts playing
+        # still stays alive.
+        if not self._synced:
+            if (self._opened_at is not None
+                    and self.clock.monotonic() - self._opened_at < SYNC_HOLD):
+                return
         # seed a lobby snapshot if the bridge has not fed one yet: an empty
         # _local must never mean "send nothing" (that is the 13 s reap)
         local = dict(self._local or {"position": 0, "paused": True, "doSeek": False})

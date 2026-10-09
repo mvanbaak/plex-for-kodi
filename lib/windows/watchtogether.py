@@ -316,11 +316,13 @@ class WatchTogetherBridge(object):
         if sup is None or pl is None:
             return
         # isPlayingVideo, not isPlaying: theme music runs through this same
-        # player. We still must emit a State while in the lobby (audio or no
-        # playback) or the relay reaps the silent socket in ~13 s (§5.8) — but
-        # it is an idle video state, never the theme's position.
+        # player. Before playback starts, echo the room's position (never 0,
+        # which would make us the driver at the start); the supervisor also
+        # holds States until synced.
         if not pl.isPlayingVideo():
-            sup.outbound_state({"position": 0, "paused": True, "doSeek": False})
+            session = sup.session
+            pos = int((session.remote.get("position", 0) if session else 0) or 0)
+            sup.outbound_state({"position": pos, "paused": True, "doSeek": False})
             return
         sup.outbound_state({
             "position": int(pl.getTime() or 0),
@@ -409,6 +411,8 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: tempo catch-up deferred (v1 hard-seek)")
         if applied:
             util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
+        # we have the room's position now: our own position may be published
+        sup.mark_synced()
 
     def _seek_to(self, target):
         """Through the seek dialog when it exists (it owns the full local seek

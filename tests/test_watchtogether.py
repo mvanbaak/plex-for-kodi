@@ -328,6 +328,7 @@ class SessionSupervisorTest(unittest.TestCase):
         sup = self.make()
         sup.start()
         client = self.open_client()
+        sup.mark_synced()
         sup.request_seek()
         self.assertTrue(wait_for(lambda: any(
             m["State"]["playstate"]["doSeek"] for m in client.states())))
@@ -343,6 +344,7 @@ class SessionSupervisorTest(unittest.TestCase):
         sup = self.make()
         sup.start()
         client = self.open_client()
+        sup.mark_synced()
         self.assertTrue(sup.outbound_state(
             {"position": 42, "paused": False, "doSeek": False}))
         # the supervisor's 1 Hz loop is the single sender (§5.5)
@@ -351,16 +353,16 @@ class SessionSupervisorTest(unittest.TestCase):
         state = client.states()[-1]
         self.assertEqual(state["State"]["playstate"]["paused"], False)
 
-    def test_heartbeat_sends_a_lobby_state_without_a_bridge_feed(self):
-        # §5.8: a joined-but-not-playing client must still emit State, or the
-        # relay reaps the silent socket in ~13 s
+    def test_states_are_held_until_synced(self):
+        # a pre-sync position must never be published: it would become the
+        # room's position and drag everyone to the start (§5.5)
         sup = self.make()
         sup.start()
         client = self.open_client()
-        self.assertTrue(wait_for(lambda: client.states()), "no State was ever sent")
-        state = client.states()[0]["State"]["playstate"]
-        self.assertEqual(state["position"], 0)
-        self.assertTrue(state["paused"])
+        self.assertFalse(client.states(), "no State before the room is applied")
+        sup.mark_synced()
+        self.assertTrue(wait_for(lambda: client.states()),
+                        "States flow once the room position is applied")
 
     def test_outbound_state_only_stores_never_sends(self):
         # the 1 Hz heartbeat is the single sender (§5.5)

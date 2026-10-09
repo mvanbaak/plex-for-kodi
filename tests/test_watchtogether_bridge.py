@@ -42,6 +42,7 @@ class FakeLatency(object):
 
 class FakeSession(object):
     latency = FakeLatency()
+    remote = {"position": 0.0}
 
 
 class FakeSupervisor(object):
@@ -64,6 +65,9 @@ class FakeSupervisor(object):
 
     def send_now(self):
         self.sent_now = getattr(self, "sent_now", 0) + 1
+
+    def mark_synced(self):
+        self.synced = True
 
     def set_ready(self, ready, manually=False):
         self.ready = ready
