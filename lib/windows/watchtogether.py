@@ -384,6 +384,11 @@ class WatchTogetherBridge(object):
         if pl is None or not pl.isPlayingVideo():
             return
         local_pos = pl.getTime() or 0.0
+        # publish our own position only once it actually matches the room: a
+        # just-started video at ~0 (or a seek that hasn't landed yet) would
+        # otherwise become the room position and drag everyone to the start
+        if abs(local_pos - remote.get("position", 0.0)) < 2.0:
+            sup.mark_synced()
         action = syncplay.sync_action(local_pos, remote.get("position", 0.0),
                                       remote.get("paused", True),
                                       session.latency.forward_delay)
@@ -425,8 +430,6 @@ class WatchTogetherBridge(object):
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
             util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
-        # we have the room's position now: our own position may be published
-        sup.mark_synced()
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo

@@ -55,6 +55,7 @@ class FakeSupervisor(object):
         self.seek_requested = False
         self.ready = None
         self.ready_manual = None
+        self.synced = False
 
     def outbound_state(self, local):
         self.sent.append(local)
@@ -544,6 +545,18 @@ class LocalChangeGraceTest(BridgeTestCase):
                               "paused": True, "doSeek": False,
                               "setBy": "other-identity"})
         self.assertEqual(self.player.controls, ["pause"])
+
+    def test_position_is_not_published_until_it_matches_the_room(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        # local ~50s, room at 0: far off, must not become the room's position
+        self.bridge.on_state({"position": 0.0, "paused": False,
+                              "doSeek": False, "setBy": "other-identity"})
+        self.assertFalse(sup.synced)
+        # now our position matches the room: safe to publish
+        self.bridge.on_state({"position": self.player.position, "paused": False,
+                              "doSeek": False, "setBy": "other-identity"})
+        self.assertTrue(sup.synced)
 
 
 class TempoTest(BridgeTestCase):
