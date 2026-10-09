@@ -301,7 +301,7 @@ class WatchTogetherBridge(object):
 bridge = WatchTogetherBridge()
 
 
-class RoomPickerDialog(kodigui.BaseDialog):
+class RoomPickerDialog(kodigui.BaseDialog, util.CronReceiver):
     """Pick an active room to join. Data comes from bridge.rooms_cache —
     the bridge's lobby thread keeps it warm, refresh_rooms() re-polls now.
     No REST on the CRON thread: it would stall every other receiver."""
@@ -320,6 +320,7 @@ class RoomPickerDialog(kodigui.BaseDialog):
         self._key = None
         bridge.refresh_rooms()
         self._sync()
+        self.setFocusId(self.LIST_ID)
         util.CRON.registerReceiver(self)
 
     def onClosed(self):
@@ -359,7 +360,7 @@ class RoomPickerDialog(kodigui.BaseDialog):
         self.doClose()
 
 
-class ParticipantsDialog(kodigui.BaseDialog):
+class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     """Who is in the room + leave. Roster refreshes from REST every 15s and
     the dialog closes itself if the room ends under it (supervisor gone)."""
 
