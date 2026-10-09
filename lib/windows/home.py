@@ -1234,6 +1234,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return False
         return catalog_id not in enabled
 
+    def _isHubHiddenFor(self, identifier, section, is_cross_section):
+        """A hub is hidden only when it is not cross-section and not the
+        always-on Watch Together hub."""
+        if is_cross_section:
+            return False
+        from . import watchtogether as wtwin
+        if identifier == wtwin.WATCHTOGETHER_HUB_ID:
+            return False
+        return self.isHubHidden(identifier, section.key)
+
     def sortHubsByUserOrder(self, hubs, is_home=False, section_key=None):
         """Sort hubs by user-defined order, preserving server order for unordered hubs."""
         # Normalize key to string (hubSettings uses string keys)
@@ -4274,11 +4284,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             str_section_key = str(section.key) if section.key is not None else None
             is_cross_section = str_cross_source is not None and str_cross_source != str_section_key
 
-            from . import watchtogether as wtwin
-            if not is_cross_section and identifier != wtwin.WATCHTOGETHER_HUB_ID:
-                if self.isHubHidden(identifier, section.key):
-                    hidden_count += 1
-                    continue
+            if self._isHubHiddenFor(identifier, section, is_cross_section):
+                hidden_count += 1
+                continue
 
             # Skip hubs with no content - they don't take a slot, but will appear
             # automatically when they have content on the next refresh.

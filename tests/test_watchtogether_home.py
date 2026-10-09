@@ -89,3 +89,22 @@ class InjectionTest(KodiTestCase):
             self.assertIs(self.win()._with_watchtogether_hub(hubs, Sec()), hubs)
         finally:
             wt.bridge.home_hub = saved
+
+
+class HiddenBypassTest(KodiTestCase):
+    def test_watchtogether_hub_is_never_hidden(self):
+        win = HomeWindow.__new__(HomeWindow)
+        win.isHubHidden = lambda identifier, key: True
+        self.assertFalse(win._isHubHiddenFor(wtwin.WATCHTOGETHER_HUB_ID, None, False))
+
+    def test_other_hubs_still_respect_the_hidden_setting(self):
+        win = HomeWindow.__new__(HomeWindow)
+        win.isHubHidden = lambda identifier, key: True
+        class Sec(object):
+            key = None
+        self.assertTrue(win._isHubHiddenFor("movie.recentlyadded", Sec(), False))
+
+    def test_cross_section_hubs_are_not_hidden_checked(self):
+        win = HomeWindow.__new__(HomeWindow)
+        win.isHubHidden = lambda identifier, key: (_ for _ in ()).throw(AssertionError("must not check"))
+        self.assertFalse(win._isHubHiddenFor("movie.recentlyadded", None, True))
