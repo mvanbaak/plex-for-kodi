@@ -205,6 +205,20 @@ class ArtResolveTest(KodiTestCase):
         self.assertEqual(self.bridge.room_art, {})
 
 
+class _FakeBusyWindow(object):
+    """Minimal stand-in for busy.BusyWindow: the xbmcgui stub cannot build
+    a real GUI window, but the join path only needs create/show/doClose."""
+    def show(self):
+        pass
+
+    def doClose(self):
+        pass
+
+    @classmethod
+    def create(cls, show=True, **kwargs):
+        return cls()
+
+
 class RoomClickedTest(KodiTestCase):
     def setUp(self):
         super(RoomClickedTest, self).setUp()
@@ -219,6 +233,10 @@ class RoomClickedTest(KodiTestCase):
         self._saved_confirm_takeover = wtwin.confirm_takeover
         self._saved_open = wtwin.ParticipantsDialog.open
         wtwin.ParticipantsDialog.open = lambda: self.calls.append(("participants",))
+        # the suite's xbmcgui stub does not model GUI windows, so @busy.dialog()
+        # cannot build its BusyWindow here; fake just the window it creates
+        self._saved_busy_window = wtwin.busy.BusyWindow
+        wtwin.busy.BusyWindow = _FakeBusyWindow
 
     def tearDown(self):
         self.bridge.join = self._saved_join
@@ -226,6 +244,7 @@ class RoomClickedTest(KodiTestCase):
         wtwin.confirm_switch = self._saved_confirm_switch
         wtwin.confirm_takeover = self._saved_confirm_takeover
         wtwin.ParticipantsDialog.open = self._saved_open
+        wtwin.busy.BusyWindow = self._saved_busy_window
         super(RoomClickedTest, self).tearDown()
 
     def test_no_room_confirms_takeover_then_joins(self):

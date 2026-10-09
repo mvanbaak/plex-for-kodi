@@ -4143,8 +4143,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def _with_watchtogether_hub(self, hubs, section):
         """Prepend the Watch Together hub on Home. Built fresh each draw so a
-        custom hub config can neither drop nor reorder it; the hub object is
-        shared, so item states still stick."""
+        custom hub config can neither drop nor reorder it; `home_hub()` rebuilds
+        the item list from the bridge's live cache on every call."""
         if section.key is not None or hubs is None:
             return hubs
         from . import watchtogether as wtwin

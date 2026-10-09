@@ -148,6 +148,35 @@ class IsWtItemTest(KodiTestCase):
         self.assertFalse(win._isWatchTogetherItem(object()))
 
 
+class PositionTrackingTest(KodiTestCase):
+    def test_wt_item_ratingKey_does_not_break_positions(self):
+        room = watchtogether.Room({"id": "r1", "title": "t", "sourceUri": "",
+                                   "users": [{"id": 1, "title": "A"}]})
+        item = wtwin.WatchTogetherRoomItem(room)
+        self.assertEqual(item.ratingKey, "r1")
+        self.assertIsNone(item.art)
+        self.assertIsNone(item.thumb)
+
+        hub = wtwin.WatchTogetherRoomsHub(lambda: [item])
+
+        class Item(object):
+            dataSource = item
+
+        class HubControl(object):
+            dataSource = hub
+
+            def getSelectedPos(self):
+                return 0
+
+            def getItemByPos(self, pos):
+                return Item()
+
+        win = HomeWindow.__new__(HomeWindow)
+        win.hubControls = (HubControl(),)
+        positions = win.getCurrentHubsPositions(None)   # is_home
+        self.assertEqual(positions.get(HUB_ID), ("r1", 0))
+
+
 class RefreshTest(KodiTestCase):
     def win(self):
         win = HomeWindow.__new__(HomeWindow)

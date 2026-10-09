@@ -69,6 +69,11 @@ class WatchTogetherRoomItem(object):
             util.T(35054, "{} watching").format(len(room.participants))
         self.image = image or WATCHTOGETHER_PLACEHOLDER
         self.cachable = False
+        # Home's hub position/reselect and storeLastBG read these directly;
+        # a plain object must still carry them (id itself is never logged).
+        self.ratingKey = str(room.id)
+        self.art = None
+        self.thumb = None
 
     def get(self, key, default=None):
         return default
@@ -241,12 +246,6 @@ class WatchTogetherBridge(object):
         # prune gone ids so a room re-created later can toast again, and the
         # set cannot grow without bound
         self._seen_rooms = current
-
-    def refresh_rooms(self):
-        """Fire-and-forget poll for a dialog that wants fresh data now."""
-        thread = threading.Thread(target=self._poll_rooms, name="wt-rooms")
-        thread.daemon = True
-        thread.start()
 
     def refresh_room(self):
         """Fresh GET /rooms/{id} while the participants dialog is open."""
@@ -525,18 +524,26 @@ class WatchTogetherBridge(object):
         if sup is not None and self.room is not None and self.room.id == room.id:
             ParticipantsDialog.open()
             return
-        if sup is not None:
+        leave_first = sup is not None
+        if leave_first:
             if not confirm_switch():
                 return
-            self.leave()
         elif not confirm_takeover(room):
             return
         try:
-            self.join(room.id)
+            self._join_or_switch(room.id, leave_first)
         except Exception as exc:
             util.DEBUG_LOG("Watch Together: join failed: {0}".format(
                 exc.__class__.__name__))
             util.showNotification(str(exc))
+
+    @busy.dialog()
+    def _join_or_switch(self, room_id, leave_first):
+        """Join/switch behind a busy spinner; the confirms stay in
+        room_clicked so the busy window never covers them."""
+        if leave_first:
+            self.leave()
+        self.join(room_id)
 
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None
