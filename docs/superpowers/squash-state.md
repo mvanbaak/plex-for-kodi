@@ -65,6 +65,10 @@ asked.
    Baselines: 805 passed at Phase 1 exit, **945 passed at Phase 2 exit**.
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
    branch — token hygiene rules from the spec apply: no token values anywhere.
+6. When the squash branch is pushed and a PR is opened upstream
+   (`pannal:develop_kodi21`), the PR body **must** list the caveats from the
+   "Draft PR body" section below. `docs/superpowers/` never ships, so the PR
+   description is the only place reviewers (and users) ever see them.
 
 ## Follow-ups not yet squashed
 
@@ -80,3 +84,50 @@ After `8a8ec00f` (Phase 2 exit), these are new granular commits on
 Known caveats shipped in `8a8ec00f`: tempo catch-up only truly applies on Kodi
 21.1+ (on 21.0 `Player.SetTempo` is refused; the bridge logs once and hard-seeks),
 and auto-join rejoins the session but does not auto-start playback.
+
+Join-time startup stutter (observed live, left as-is): joining a room opens the
+video at offset 0, then the first relay `State` makes the bridge seek to the
+room's position. That mid-playback seek refills the buffer (the visible freeze);
+because the room keeps advancing while it refills, a second corrective seek lands
+shortly after — two stalls in the first few seconds, then sync is stable. The
+proper fix is to open the video at the room position (needs the first `State`
+before playback, so an explicit start offset would have to be threaded through
+`videoplayer.play` → `playVideo` → `_playVideo`); the cheaper WT-only mitigation
+is to skip a drift-based remote seek while the player is still seeking/caching.
+
+## Draft PR body (for the final upstream PR)
+
+Rule 6 requires this to be pasted (and kept current) into the PR description
+when `feature/watch-together-squash` is pushed. Copy from the block below.
+
+```markdown
+# Plex Watch Together — Home hub, join/leave, OSD sync
+
+Adds Plex Watch Together as a guest client:
+
+- Rooms appear as the **first Home hub**, hidden when there are none.
+- A tile joins the room (confirm on takeover / switching rooms); while watching
+  a room, clicking its tile opens the participants dialog.
+- Room tiles have a context menu: Join / Remove / Info.
+- The video OSD gains a single person-icon button (Leave room / Participants).
+- The room info dialog lists the media item and participants (live marker for
+  the room you are in).
+- Leaving sends `DELETE` (drops membership); stopping playback only
+  disconnects, keeping membership so the tile can rejoin.
+
+## Known limitations
+
+- **Tempo catch-up needs Kodi 21.1+.** On 21.0 `Player.SetTempo` is refused; the
+  bridge logs once and falls back to a hard seek. (Hard-seek sync still works.)
+- **Auto-join does not auto-start playback.** If enabled, it rejoins the session
+  on startup but the user still starts playback themselves.
+- **Joining a room can stutter for the first few seconds.** Playback opens at 0
+  and then syncs to the room's position; the seek's buffer refill — plus a second
+  corrective seek that lands while it is still refilling — freezes briefly. Sync
+  is stable afterwards. Not fixed here; the fix is to open the video at the room
+  position instead of seeking into it.
+- **Guest-only in v1.** Creating/inviting to rooms (host capability) is planned
+  for a follow-up.
+
+Not included: the templating staleness fix, tracked separately (PR #299).
+```
