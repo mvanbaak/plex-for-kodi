@@ -319,6 +319,31 @@ class SessionTest(unittest.TestCase):
         sess.on_message({"List": {"otherroom": {"x": {}}}})
         self.assertEqual(sess.roster, {})
 
+    def test_list_extracts_the_rooms_current_file(self):
+        # §5.4a/§5.8: a mid-session joiner reads the file from a peer's entry
+        sess, _ = self.make()
+        inner = json.dumps({"ads": {"playing": False},
+                            "uri": "server://x/metadata/9"}, separators=(",", ":"))
+        sess.on_message({"List": {"ca8cfezmke4": {
+            "peer": {"position": 0, "file": {"name": inner}}}}})
+        self.assertEqual(sess.file["uri"], "server://x/metadata/9")
+
+    def test_non_object_file_payload_keeps_the_current_file(self):
+        # §5.4a: a truncated/non-object peer frame must not wipe the room file
+        sess, _ = self.make()
+        sess.file = {"uri": "old"}
+        sess.on_message({"Set": {"file": {"name": "123"}}})
+        self.assertEqual(sess.file, {"uri": "old"})
+
+    def test_unparseable_position_drops_the_whole_frame(self):
+        # applying pause/seek with a stale position would move every peer to it
+        sess, _ = self.make()
+        sess.on_message({"State": {"playstate": {
+            "position": "not-a-number", "paused": True,
+            "setBy": '{"deviceIdentifier":"other"}'}}}, now_mono=5.0)
+        self.assertEqual(sess.remote["position"], 0.0)
+        self.assertEqual(self.states, [])
+
     def test_set_ready_updates_roster_entry(self):
         sess, ident = self.make()
         sess.roster[ident] = {"isReady": None}
@@ -329,12 +354,23 @@ class SessionTest(unittest.TestCase):
 
     def test_set_user_event_left_fires_and_drops_roster_entry(self):
         # §5.8 — transport death reaches peers in ~0.2 s as this event
+        sess, _ = self.make()
+        peer = '{"deviceIdentifier":"other","deviceName":"K","userID":"2"}'
+        sess.roster[peer] = {"isReady": True}
+        sess.on_message({"Set": {"user": {peer: {
+            "room": {"name": "ca8cfezmke4"}, "event": {"left": True}}}}})
+        self.assertEqual(self.events, [("left", peer)])
+        self.assertNotIn(peer, sess.roster)
+
+    def test_own_left_event_is_advisory_not_a_peer_departure(self):
+        # §5.8: left against our own key is also the relay's silence-reap
+        # signal — keep reading, do not drop ourselves or treat it as a leave
         sess, ident = self.make()
         sess.roster[ident] = {"isReady": True}
         sess.on_message({"Set": {"user": {ident: {
             "room": {"name": "ca8cfezmke4"}, "event": {"left": True}}}}})
-        self.assertEqual(self.events, [("left", ident)])
-        self.assertNotIn(ident, sess.roster)
+        self.assertEqual(self.events, [])
+        self.assertIn(ident, sess.roster)
 
     def test_set_user_event_joined_fires(self):
         sess, _ = self.make()

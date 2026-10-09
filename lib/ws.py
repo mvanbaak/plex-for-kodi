@@ -9,6 +9,7 @@ extensions, no compression — the relay uses none of them.
 from __future__ import absolute_import
 
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -99,6 +100,15 @@ def new_key():
     return base64.b64encode(os.urandom(16)).decode()
 
 
+ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def accept_key(key):
+    """RFC6455 §4.2.2: base64(sha1(key + GUID))."""
+    digest = hashlib.sha1((key + ACCEPT_GUID).encode("ascii")).digest()
+    return base64.b64encode(digest).decode()
+
+
 def handshake_request(host, key, origin="https://app.plex.tv"):
     """The exact request wsprobe.py sent — live-verified against the relay."""
     lines = [
@@ -113,8 +123,12 @@ def handshake_request(host, key, origin="https://app.plex.tv"):
     return ("\r\n".join(lines) + "\r\n\r\n").encode()
 
 
-def handshake_response_status(head_bytes):
-    """Parse the response head; return the status, raise unless it is 101."""
+def handshake_response_status(head_bytes, key=None):
+    """Parse the response head; return the status, raise unless it is 101.
+
+    When `key` is given, verify Sec-WebSocket-Accept (§8 transport) — the
+    digest is what makes the upgrade ours and not a proxy's.
+    """
     first = head_bytes.split(b"\r\n", 1)[0].decode("latin-1")
     parts = first.split()
     if len(parts) < 2 or not parts[1].isdigit():
@@ -122,6 +136,17 @@ def handshake_response_status(head_bytes):
     status = int(parts[1])
     if status != 101:
         raise HandshakeError("handshake rejected: %s" % first)
+    if key is not None:
+        got = ""
+        for line in head_bytes.split(b"\r\n")[1:]:
+            name, sep, value = line.partition(b":")
+            if sep and name.strip().lower() == b"sec-websocket-accept":
+                got = value.strip().decode("latin-1")
+                break
+        expected = accept_key(key)
+        if got != expected:
+            raise HandshakeError("bad Sec-WebSocket-Accept: %r != %r"
+                                 % (got, expected))
     return status
 
 
@@ -183,8 +208,8 @@ class WSClient(object):
                 # verification stays ON for *.syncplay.plex.services (§10.2)
                 ctx = ssl.create_default_context()
                 raw = ctx.wrap_socket(raw, server_hostname=self.host)
-            raw.settimeout(1.0)
-            raw.sendall(handshake_request(self.host, new_key()))
+            key = new_key()
+            raw.sendall(handshake_request(self.host, key))
             head = b""
             while b"\r\n\r\n" not in head:
                 chunk = raw.recv(4096)
@@ -192,7 +217,10 @@ class WSClient(object):
                     raise HandshakeError("connection closed during handshake")
                 head += chunk
             head, rest = head.split(b"\r\n\r\n", 1)
-            handshake_response_status(head)
+            handshake_response_status(head, key)
+            # shorten the timeout only after the handshake: a slow PoP must not
+            # look like a connect failure and be retried
+            raw.settimeout(1.0)
             with self._wlock:
                 self._sock = raw
             if self.on_open:
@@ -210,6 +238,8 @@ class WSClient(object):
     def _read_loop(self, initial=b""):
         for op, payload in self._decoder.feed(initial):
             self._dispatch(op, payload)
+            if self._stopped.is_set():
+                return
         while not self._stopped.is_set():
             try:
                 chunk = self._sock.recv(65536)
@@ -221,12 +251,18 @@ class WSClient(object):
                 raise EOFError("server closed TCP")
             for op, payload in self._decoder.feed(chunk):
                 self._dispatch(op, payload)
+                if self._stopped.is_set():
+                    return
 
     def _dispatch(self, op, payload):
         if op == 0x9:                     # ping -> pong, immediately (§10.2)
             self.send_raw(payload, 0xA)
             return
         if op == 0x8:                     # close
+            try:
+                self.send_raw(payload, 0x8)   # RFC6455: echo the close frame
+            except OSError:
+                pass
             self._stopped.set()
             return
         if op in (0x1, 0x2):

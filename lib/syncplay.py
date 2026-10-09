@@ -158,7 +158,9 @@ class Session(object):
         self.on_roster = on_roster
         self.on_event = on_event
         self.relay_ignore = 0       # ignoringOnTheFly.server, live from wire (§5.9)
-        self.local_ignore = 0       # 1 = local-only correction, don't rebroadcast (§5.7)
+        # ignoringOnTheFly.client: 1 means "apply to me but do not rebroadcast".
+        # v1 emits no local drift nudge, so this stays 0 (deferred with tempo).
+        self.local_ignore = 0
         self.latency = Latency()
         self.remote = {"position": 0.0, "paused": True, "doSeek": False,
                        "setBy": None}
@@ -178,7 +180,13 @@ class Session(object):
         if "Hello" in msg:
             self.relay_hello = msg["Hello"]
         elif "List" in msg:
-            self.roster = dict(msg["List"].get(self.room) or {})
+            entries = msg["List"].get(self.room) or {}
+            self.roster = dict(entries)
+            # §5.4a/§5.8: a mid-session joiner learns the room's current file
+            # from a peer's List entry — the relay stores no playlist
+            for entry in entries.values():
+                if isinstance(entry, dict):
+                    self._take_file(entry.get("file"))
             if self.on_roster:
                 self.on_roster(dict(self.roster))
         elif "Set" in msg:
@@ -203,19 +211,30 @@ class Session(object):
                 event = entry.get("event") or {}
                 if "left" in event or "joined" in event:
                     kind = "left" if event.get("left") else "joined"
-                    if kind == "left":
-                        self.roster.pop(key, None)
-                    if self.on_event:
-                        self.on_event(kind, key)
+                    if kind == "left" and is_self(key, self.identity):
+                        # §5.8: left against our own key is advisory — it is
+                        # also how the relay reaps a live-but-silent socket, so
+                        # it must not be read as a peer departure or a reconnect
+                        pass
+                    else:
+                        if kind == "left":
+                            self.roster.pop(key, None)
+                        if self.on_event:
+                            self.on_event(kind, key)
                 self._take_file(entry.get("file"))
         self._take_file(sub.get("file"))
 
     def _take_file(self, file_obj):
-        if isinstance(file_obj, dict) and isinstance(file_obj.get("name"), str):
-            try:
-                self.file = json.loads(file_obj["name"])
-            except ValueError:
-                self.file = None
+        if not (isinstance(file_obj, dict) and isinstance(file_obj.get("name"), str)):
+            return
+        try:
+            parsed = json.loads(file_obj["name"])
+        except ValueError:
+            return
+        # §5.4a: the relay validates nothing. Only a well-formed object replaces
+        # the current file — one truncated peer frame must not wipe it.
+        if isinstance(parsed, dict):
+            self.file = parsed
 
     def _on_state(self, state, now_mono=None):
         ig = state.get("ignoringOnTheFly") or {}
@@ -235,7 +254,11 @@ class Session(object):
             if ps.get(key) is not None:
                 value = ps[key]
                 if key == "position":
-                    value = float(value)   # §5.5: never truncate the relay's float
+                    try:
+                        value = float(value)   # §5.5: never truncate the float
+                    except (TypeError, ValueError):
+                        return   # unparseable frame: applying a stale position
+                                 # would seek every peer to it — drop the frame
                 self.remote[key] = value
         self.remote["setBy"] = ps.get("setBy")
         if self.on_state:
@@ -252,7 +275,7 @@ class Session(object):
                      "latencyCalculation": epoch},
             "playstate": {"doSeek": bool(local.get("doSeek", False)),
                           "paused": bool(local.get("paused", True)),
-                          "position": int(local.get("position", 0)),
+                          "position": int(local.get("position") or 0),
                           "setBy": None},
             "ignoringOnTheFly": {"client": self.local_ignore,
                                  "server": self.relay_ignore}}}
