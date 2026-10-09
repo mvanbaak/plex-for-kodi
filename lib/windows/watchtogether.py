@@ -16,7 +16,7 @@ from kodi_six import xbmc
 from plexnet import plexapp
 
 from lib import plex, player, syncplay, util, watchtogether, ws
-from . import kodigui
+from . import busy, kodigui
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):
@@ -299,3 +299,130 @@ class WatchTogetherBridge(object):
 
 
 bridge = WatchTogetherBridge()
+
+
+class RoomPickerDialog(kodigui.BaseDialog):
+    """Pick an active room to join. Data comes from bridge.rooms_cache —
+    the bridge's lobby thread keeps it warm, refresh_rooms() re-polls now.
+    No REST on the CRON thread: it would stall every other receiver."""
+
+    xmlFile = 'script-plex-watchtogether_room_picker.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+
+    def onFirstInit(self):
+        self.roomList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        self._key = None
+        bridge.refresh_rooms()
+        self._sync()
+        util.CRON.registerReceiver(self)
+
+    def onClosed(self):
+        util.CRON.cancelReceiver(self)
+
+    def tick(self):
+        self._sync()
+
+    def _sync(self):
+        rooms = bridge.rooms_cache
+        self.setProperty('empty', '1' if not rooms else '0')
+        key = tuple((r.id, len(r.participants)) for r in rooms)
+        if key == self._key:
+            return                      # only rebuild on change: keep focus
+        self._key = key
+        items = [kodigui.ManagedListItem(
+            room.title,
+            util.T(35054, '{} watching').format(len(room.participants)),
+            data_source=room) for room in rooms]
+        self.roomList.reset()
+        self.roomList.addItems(items)
+
+    def onClick(self, controlID):
+        if controlID != self.LIST_ID:
+            return
+        mli = self.roomList.getSelectedItem()
+        if mli and mli.dataSource:
+            self.joinRoom(mli.dataSource.id)
+
+    @busy.dialog()
+    def joinRoom(self, room_id):
+        try:
+            bridge.join(room_id)
+        except watchtogether.WatchTogetherError as exc:
+            util.showNotification(str(exc))
+            return
+        self.doClose()
+
+
+class ParticipantsDialog(kodigui.BaseDialog):
+    """Who is in the room + leave. Roster refreshes from REST every 15s and
+    the dialog closes itself if the room ends under it (supervisor gone)."""
+
+    xmlFile = 'script-plex-watchtogether_participants.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    LEAVE_ID = 60
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        self._key = None
+        self._ticks = 0
+        bridge.refresh_room()
+        self._sync()
+        util.CRON.registerReceiver(self)
+
+    def onClosed(self):
+        util.CRON.cancelReceiver(self)
+
+    def tick(self):
+        if bridge.supervisor is None:
+            self.doClose()              # room gone / left from elsewhere
+            return
+        self._ticks += 1
+        if self._ticks % 15 == 0:
+            bridge.refresh_room()
+        self._sync()
+
+    def _sync(self):
+        room = bridge.room
+        participants = room.participants if room else []
+        key = tuple(sorted(str(u.get('id')) for u in participants))
+        if key == self._key:
+            return
+        self._key = key
+        items = [kodigui.ManagedListItem(
+            u.get('title') or u.get('username') or '',
+            u.get('username') or '',
+            data_source=u) for u in participants]
+        self.peopleList.reset()
+        self.peopleList.addItems(items)
+
+    def onClick(self, controlID):
+        if controlID == self.LEAVE_ID:
+            self.leaveRoom()
+
+    @busy.dialog()
+    def leaveRoom(self):
+        bridge.leave()
+        self.doClose()
+
+
+def show():
+    """Sidebar entry: participants when in a room, the picker otherwise."""
+    bridge.start()
+    if bridge.supervisor:
+        window = ParticipantsDialog.open()
+    else:
+        window = RoomPickerDialog.open()
+    del window
+    util.garbageCollect()
