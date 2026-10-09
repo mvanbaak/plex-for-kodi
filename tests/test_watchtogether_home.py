@@ -108,3 +108,75 @@ class HiddenBypassTest(KodiTestCase):
         win = HomeWindow.__new__(HomeWindow)
         win.isHubHidden = lambda identifier, key: (_ for _ in ()).throw(AssertionError("must not check"))
         self.assertFalse(win._isHubHiddenFor("movie.recentlyadded", None, True))
+
+
+class ClickRouteTest(KodiTestCase):
+    def test_wt_item_routes_to_room_clicked(self):
+        import lib.windows.watchtogether as wt
+        clicked = []
+        saved = wt.bridge.room_clicked
+        wt.bridge.room_clicked = clicked.append
+        try:
+            room = watchtogether.Room({"id": "r", "title": "t", "sourceUri": "",
+                                       "users": []})
+            item = wt.WatchTogetherRoomItem(room)
+
+            class MLI(object):
+                dataSource = item
+
+            class Control(object):
+                def getSelectedItem(self):
+                    return MLI()
+
+            win = HomeWindow.__new__(HomeWindow)
+            win.hubControls = (Control(),)
+            win.hubItemClicked(400)
+        finally:
+            wt.bridge.room_clicked = saved
+        self.assertEqual(clicked, [item.room])
+
+
+class IsWtItemTest(KodiTestCase):
+    def test_true_for_room_item(self):
+        win = HomeWindow.__new__(HomeWindow)
+        room = watchtogether.Room({"id": "r", "title": "t", "sourceUri": "",
+                                   "users": []})
+        self.assertTrue(win._isWatchTogetherItem(wtwin.WatchTogetherRoomItem(room)))
+
+    def test_false_for_other(self):
+        win = HomeWindow.__new__(HomeWindow)
+        self.assertFalse(win._isWatchTogetherItem(object()))
+
+
+class RefreshTest(KodiTestCase):
+    def win(self):
+        win = HomeWindow.__new__(HomeWindow)
+        win._wtRoomsVersion = None
+        win._shown = []
+        win.showHubs = lambda *a, **k: win._shown.append((a, k))
+        win.getCurrentHubsPositions = lambda section: {"p": 1}
+        return win
+
+    def test_no_change_no_redraw(self):
+        import lib.windows.watchtogether as wt
+        saved = wt.bridge.rooms_version
+        wt.bridge.rooms_version = 5
+        try:
+            win = self.win()
+            win._wtRoomsVersion = 5
+            self.assertFalse(win.checkWatchTogetherHub())
+            self.assertEqual(win._shown, [])
+        finally:
+            wt.bridge.rooms_version = saved
+
+    def test_change_redraws_home(self):
+        import lib.windows.watchtogether as wt
+        saved = wt.bridge.rooms_version
+        wt.bridge.rooms_version = 6
+        try:
+            win = self.win()
+            win._wtRoomsVersion = 5
+            self.assertTrue(win.checkWatchTogetherHub())
+            self.assertEqual(len(win._shown), 1)
+        finally:
+            wt.bridge.rooms_version = saved

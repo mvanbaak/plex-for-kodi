@@ -203,3 +203,57 @@ class ArtResolveTest(KodiTestCase):
         self.bridge.api = _StubAPI([])
         self.bridge._poll_rooms()
         self.assertEqual(self.bridge.room_art, {})
+
+
+class RoomClickedTest(KodiTestCase):
+    def setUp(self):
+        super(RoomClickedTest, self).setUp()
+        self.bridge = wtwin.WatchTogetherBridge()
+        self.room = watchtogether.Room(ROOM)
+        self.calls = []
+        self._saved_join = self.bridge.join
+        self._saved_leave = self.bridge.leave
+        self.bridge.join = lambda rid: self.calls.append(("join", rid))
+        self.bridge.leave = lambda: self.calls.append(("leave",))
+        self._saved_confirm_switch = wtwin.confirm_switch
+        self._saved_confirm_takeover = wtwin.confirm_takeover
+        self._saved_open = wtwin.ParticipantsDialog.open
+        wtwin.ParticipantsDialog.open = lambda: self.calls.append(("participants",))
+
+    def tearDown(self):
+        self.bridge.join = self._saved_join
+        self.bridge.leave = self._saved_leave
+        wtwin.confirm_switch = self._saved_confirm_switch
+        wtwin.confirm_takeover = self._saved_confirm_takeover
+        wtwin.ParticipantsDialog.open = self._saved_open
+        super(RoomClickedTest, self).tearDown()
+
+    def test_no_room_confirms_takeover_then_joins(self):
+        wtwin.confirm_takeover = lambda room: True
+        self.bridge.room_clicked(self.room)
+        self.assertEqual(self.calls, [("join", "ca8cfezmke4")])
+
+    def test_takeover_declined_does_nothing(self):
+        wtwin.confirm_takeover = lambda room: False
+        self.bridge.room_clicked(self.room)
+        self.assertEqual(self.calls, [])
+
+    def test_same_room_opens_participants(self):
+        self.bridge.supervisor = object()
+        self.bridge.room = self.room
+        self.bridge.room_clicked(self.room)
+        self.assertEqual(self.calls, [("participants",)])
+
+    def test_switch_confirmed_leaves_then_joins(self):
+        wtwin.confirm_switch = lambda: True
+        self.bridge.supervisor = object()
+        self.bridge.room = watchtogether.Room(dict(ROOM, id="other"))
+        self.bridge.room_clicked(self.room)
+        self.assertEqual(self.calls, [("leave",), ("join", "ca8cfezmke4")])
+
+    def test_switch_declined_does_nothing(self):
+        wtwin.confirm_switch = lambda: False
+        self.bridge.supervisor = object()
+        self.bridge.room = watchtogether.Room(dict(ROOM, id="other"))
+        self.bridge.room_clicked(self.room)
+        self.assertEqual(self.calls, [])

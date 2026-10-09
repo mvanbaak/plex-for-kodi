@@ -738,6 +738,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self._lastReachabilityCheck = 0
         self._lastPathMappingProbe = 0
         self._pathMappingTargets = []
+        self._wtRoomsVersion = None
 
         from . import windowutils
         windowutils.HOME = self
@@ -1243,6 +1244,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if identifier == wtwin.WATCHTOGETHER_HUB_ID:
             return False
         return self.isHubHidden(identifier, section.key)
+
+    def _isWatchTogetherItem(self, ds):
+        from . import watchtogether as wtwin
+        return isinstance(ds, wtwin.WatchTogetherRoomItem)
 
     def sortHubsByUserOrder(self, hubs, is_home=False, section_key=None):
         """Sort hubs by user-defined order, preserving server order for unordered hubs."""
@@ -2459,6 +2464,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if not self.lastSection or self._ignoreTick:
             return
 
+        if self.is_active and self.lastSection is home_section:
+            self.checkWatchTogetherHub()
+
         hubs = self.sectionHubs.get(self.lastSection.key)
         if hubs is None:
             return
@@ -3030,6 +3038,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return
 
         if mli.dataSource is None:
+            return
+
+        if self._isWatchTogetherItem(mli.dataSource):
+            from . import watchtogether as wtwin
+            wtwin.bridge.room_clicked(mli.dataSource.room)
             return
 
         # auto resume for in-progress items
@@ -4143,6 +4156,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         combined.lastUpdated = getattr(hubs, 'lastUpdated', 0)
         combined.invalid = getattr(hubs, 'invalid', False)
         return combined
+
+    def checkWatchTogetherHub(self):
+        """Redraw Home when the Watch Together room set changed. Returns True
+        when it redrew."""
+        from . import watchtogether as wtwin
+        version = wtwin.bridge.rooms_version
+        if version == self._wtRoomsVersion:
+            return False
+        self._wtRoomsVersion = version
+        self.showHubs(home_section, update=True,
+                      reselect_pos_dict=self.getCurrentHubsPositions(home_section))
+        return True
 
     @busy.busy_property()
     def _showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):

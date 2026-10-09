@@ -112,6 +112,30 @@ def needs_takeover_confirm(room, playing_key):
     return str(playing_key) != room_key
 
 
+def playing_rating_key():
+    video = getattr(player.PLAYER, "video", None)
+    return str(getattr(video, "ratingKey", "") or "")
+
+
+def confirm_takeover(room):
+    """True if joining may proceed: nothing playing, the room's own content,
+    or the user confirmed the takeover."""
+    if not player.PLAYER.isPlayingVideo():
+        return True
+    if not needs_takeover_confirm(room, playing_rating_key()):
+        return True
+    return xbmcgui.Dialog().yesno(
+        util.T(35053, "Watch Together"),
+        util.T(35060, "You are already watching something else. "
+                      "Join and take over playback?"))
+
+
+def confirm_switch():
+    return xbmcgui.Dialog().yesno(
+        util.T(35053, "Watch Together"),
+        util.T(35061, "Leave the current room and join this one?"))
+
+
 def _ws_factory(host, port, on_open, on_message, on_close):
     return ws.WSClient(host, port, on_message, on_open=on_open, on_close=on_close)
 
@@ -494,6 +518,20 @@ class WatchTogetherBridge(object):
                     exc.__class__.__name__))
         if sup:
             sup.stop()
+
+    def room_clicked(self, room):
+        """Hub tile click: join, switch, or open participants for this room."""
+        sup = self.supervisor
+        if sup is not None and self.room is not None and self.room.id == room.id:
+            ParticipantsDialog.open()
+            return
+        if sup is not None:
+            if not confirm_switch():
+                return
+            self.leave()
+        elif not confirm_takeover(room):
+            return
+        self.join(room.id)
 
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None

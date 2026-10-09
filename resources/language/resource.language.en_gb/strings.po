@@ -3400,3 +3400,7 @@ msgstr ""
 msgctxt "#35060"
 msgid "You are already watching something else. Join and take over playback?"
 msgstr ""
+
+msgctxt "#35061"
+msgid "Leave the current room and join this one?"
+msgstr ""
