@@ -3356,3 +3356,47 @@ msgstr ""
 msgctxt "#35049"
 msgid "Local mode reaches your server over plain HTTP, so \"Allow Insecure Connections\" has been set to \"Always\".\n\nYour server needs the matching setting: in Plex under Settings > Network, \"Secure connections\" has to be \"Preferred\" - with \"Required\" the server refuses these connections."
 msgstr ""
+
+msgctxt "#35051"
+msgid "Auto-join the last Watch Together room on startup"
+msgstr ""
+
+msgctxt "#35052"
+msgid "Show Watch Together status on the video OSD"
+msgstr ""
+
+msgctxt "#35053"
+msgid "Watch Together"
+msgstr ""
+
+msgctxt "#35054"
+msgid "{} watching"
+msgstr ""
+
+msgctxt "#35055"
+msgid "Reconnecting…"
+msgstr ""
+
+msgctxt "#35056"
+msgid "Leave room"
+msgstr ""
+
+msgctxt "#35057"
+msgid "No active rooms"
+msgstr ""
+
+msgctxt "#35058"
+msgid "New Watch Together room: {}"
+msgstr ""
+
+msgctxt "#35059"
+msgid "The Watch Together room has ended"
+msgstr ""
+
+msgctxt "#35060"
+msgid "You are already watching something else. Join and take over playback?"
+msgstr ""
+
+msgctxt "#35061"
+msgid "Leave the current room and join this one?"
+msgstr ""
