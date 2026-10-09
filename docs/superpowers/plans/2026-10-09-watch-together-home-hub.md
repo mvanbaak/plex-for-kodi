@@ -887,26 +887,34 @@ In `tick`, after the `if not self.lastSection or self._ignoreTick: return` guard
             self.checkWatchTogetherHub()
 ```
 
+Add to `resources/language/resource.language.en_gb/strings.po` after `#35060` (the i18n test enforces that every `T()` id exists, and `confirm_switch` references this one):
+
+```
+msgctxt "#35061"
+msgid "Leave the current room and join this one?"
+msgstr ""
+```
+
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_watchtogether_hub.py tests/test_watchtogether_home.py -q`
+Run: `uv run pytest tests/test_watchtogether_hub.py tests/test_watchtogether_home.py tests/test_i18n.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/windows/home.py lib/windows/watchtogether.py tests/test_watchtogether_hub.py tests/test_watchtogether_home.py
+git add lib/windows/home.py lib/windows/watchtogether.py resources/language/resource.language.en_gb/strings.po tests/test_watchtogether_hub.py tests/test_watchtogether_home.py
 git commit -m "feat(watchtogether): hub click join/switch/participants and Home refresh"
 ```
 
 ---
 
-### Task 5: Retire the picker and add the switch string
+### Task 5: Retire the picker
 
 **Files:**
-- Modify: `lib/windows/watchtogether.py`, `resources/language/resource.language.en_gb/strings.po`
+- Modify: `lib/windows/watchtogether.py`
 - Delete: `resources/skins/Main/1080i/templates/script-plex-watchtogether_room_picker.xml.tpl`
-- Test: `tests/test_watchtogether_hub.py`, `tests/test_i18n.py`, `tests/test_templates.py`
+- Test: `tests/test_watchtogether_hub.py`, `tests/test_templates.py`
 
 **Interfaces:**
 - Consumes: `ParticipantsDialog`, `bridge.start()`.
@@ -919,14 +927,16 @@ class ShowEntryTest(KodiTestCase):
     def setUp(self):
         super(ShowEntryTest, self).setUp()
         self.opened = []
-        self._saved = wtwin.ParticipantsDialog.open
+        self._saved_open = wtwin.ParticipantsDialog.open
         wtwin.ParticipantsDialog.open = lambda: self.opened.append(1)
         self._saved_start = wtwin.bridge.start
         wtwin.bridge.start = lambda: None
+        self._saved_sup = wtwin.bridge.supervisor
 
     def tearDown(self):
-        wtwin.ParticipantsDialog.open = self._saved
+        wtwin.ParticipantsDialog.open = self._saved_open
         wtwin.bridge.start = self._saved_start
+        wtwin.bridge.supervisor = self._saved_sup
         super(ShowEntryTest, self).tearDown()
 
     def test_no_room_does_nothing(self):
@@ -962,23 +972,15 @@ def show():
         util.garbageCollect()
 ```
 
-Add to `resources/language/resource.language.en_gb/strings.po` after `#35060`:
-
-```
-msgctxt "#35061"
-msgid "Leave the current room and join this one?"
-msgstr ""
-```
-
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `uv run pytest tests/test_watchtogether_hub.py tests/test_i18n.py tests/test_templates.py -q`
+Run: `uv run pytest tests/test_watchtogether_hub.py tests/test_templates.py -q`
 Expected: PASS (the template inventory tests reconcile the removed template and its reference).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add lib/windows/watchtogether.py resources/language/resource.language.en_gb/strings.po
+git add lib/windows/watchtogether.py
 git rm resources/skins/Main/1080i/templates/script-plex-watchtogether_room_picker.xml.tpl
 git commit -m "feat(watchtogether): retire the room picker; rooms live on Home"
 ```
@@ -1020,7 +1022,7 @@ Expected: all Phase 2 paths differ (the squash branch is still Phase 1); no unex
 
 ## Self-review
 
-**Spec coverage:** always-on hub (Tasks 1, 3), 16:9 art + placeholder (Task 2), item/participant names (Task 1), first-position injection (Task 3), click join/switch/participants (Task 4), tick refresh (Task 4), picker retired + string (Task 5), no extra polling (no task — by design), error handling (Tasks 1, 2, 4), testing (Tasks 1–5), verification (Task 6).
+**Spec coverage:** always-on hub (Tasks 1, 3), 16:9 art + placeholder (Task 2), item/participant names (Task 1), first-position injection (Task 3), click join/switch/participants (Task 4), tick refresh (Task 4), picker retired (Task 5), switch string `35061` (Task 4, where it is first referenced), no extra polling (no task — by design), error handling (Tasks 1, 2, 4), testing (Tasks 1–5), verification (Task 6).
 
 **Type consistency:** `WATCHTOGETHER_HUB_ID`, `WatchTogetherRoomItem`, `WatchTogetherRoomsHub`, `home_hub()`, `room_clicked()`, `confirm_takeover()`, `confirm_switch()`, `checkWatchTogetherHub()`, `_with_watchtogether_hub()` are used with the same names/signatures in every task that references them.
 
