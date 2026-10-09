@@ -13,7 +13,7 @@ import threading
 import time
 
 from kodi_six import xbmc, xbmcgui
-from plexnet import plexapp, plexobjects
+from plexnet import plexapp, plexlibrary, plexobjects
 
 from lib import plex, player, syncplay, util, watchtogether, ws
 from . import busy, kodigui
@@ -36,6 +36,69 @@ def parse_source_uri(uri):
     if not rating_key:
         return None, None
     return machine, rating_key
+
+
+WATCHTOGETHER_HUB_ID = "watchtogether.rooms"
+WATCHTOGETHER_PLACEHOLDER = "script.plex/thumb_fallbacks/movie16x9.png"
+
+
+def participant_names(users):
+    """users[] -> "A", "A and B", "A, B and C" (title, falling back to username)."""
+    names = []
+    for user in users or []:
+        if not isinstance(user, dict):
+            continue
+        name = user.get("title") or user.get("username")
+        if name:
+            names.append(name)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return "{0} and {1}".format(", ".join(names[:-1]), names[-1])
+
+
+class WatchTogetherRoomItem(object):
+    """One room tile. Not a PlexObject — the home renderer must not treat it
+    as media, so `get()` is inert and `cachable` is False."""
+    def __init__(self, room, image=None):
+        self.room = room
+        self.type = "watchtogether"
+        self.title = room.title
+        self.subtitle = participant_names(room.participants) or \
+            util.T(35054, "{} watching").format(len(room.participants))
+        self.image = image or WATCHTOGETHER_PLACEHOLDER
+        self.cachable = False
+
+    def get(self, key, default=None):
+        return default
+
+
+class WatchTogetherRoomsHub(plexlibrary.BaseHub):
+    """Client-built Home hub (no Plex hub backs it), modelled on CollectionsHub.
+    `factory()` rebuilds the item list from the bridge's live cache."""
+    TYPE = "Hub"
+    type = "watchtogether"
+    hubIdentifier = WATCHTOGETHER_HUB_ID
+
+    def __init__(self, factory, *args, **kwargs):
+        super(WatchTogetherRoomsHub, self).__init__(False, *args, **kwargs)
+        self._factory = factory
+        self.items = factory()
+        self.set("title", util.T(35053, "Watch Together"))
+
+    def getCleanHubIdentifier(self, is_home=False):
+        return self.hubIdentifier
+
+    def reset(self):
+        # BaseHub.reset reads items[0].container; ours are plain objects
+        self.set("offset", 0)
+        self.set("size", len(self.items))
+        self.set("more", "")
+
+    def reload(self, **kwargs):
+        self.items = self._factory()
+        return self
 
 
 def needs_takeover_confirm(room, playing_key):
@@ -67,6 +130,9 @@ class WatchTogetherBridge(object):
         self.supervisor = None
         self.room = None
         self.rooms_cache = []
+        self.rooms_version = 0
+        self.room_art = {}
+        self._rooms_key = None
         self._rooms_seeded = False
         self._seen_rooms = set()
         self._thread = None
@@ -126,6 +192,10 @@ class WatchTogetherBridge(object):
             util.DEBUG_LOG("Watch Together: room poll failed: {0}".format(exc.__class__.__name__))
             return
         self.rooms_cache = rooms
+        key = tuple(sorted((r.id, len(r.participants)) for r in rooms))
+        if key != self._rooms_key:
+            self._rooms_key = key
+            self.rooms_version += 1
         current = set(r.id for r in rooms)
         if not self._rooms_seeded:
             # first paint: remember, never toast what was already there
@@ -162,6 +232,17 @@ class WatchTogetherBridge(object):
         thread = threading.Thread(target=work, name="wt-room")
         thread.daemon = True
         thread.start()
+
+    # -- home hub ------------------------------------------------------------
+
+    def _build_room_items(self):
+        return [WatchTogetherRoomItem(r, self.room_art.get(r.id))
+                for r in self.rooms_cache]
+
+    def home_hub(self):
+        if not self.rooms_cache:
+            return None
+        return WatchTogetherRoomsHub(self._build_room_items)
 
     # -- local -> relay -------------------------------------------------------
 
