@@ -258,6 +258,19 @@ class RoomClickedTest(KodiTestCase):
         self.bridge.room_clicked(self.room)
         self.assertEqual(self.calls, [])
 
+    def test_join_failure_notifies_without_raising(self):
+        wtwin.confirm_takeover = lambda room: True
+        self.bridge.join = lambda rid: (_ for _ in ()).throw(
+            watchtogether.RoomGone("gone"))
+        toasts = []
+        saved = wtwin.util.showNotification
+        wtwin.util.showNotification = toasts.append
+        try:
+            self.bridge.room_clicked(self.room)   # must not raise
+        finally:
+            wtwin.util.showNotification = saved
+        self.assertEqual(len(toasts), 1)
+
 
 class ShowEntryTest(KodiTestCase):
     def setUp(self):

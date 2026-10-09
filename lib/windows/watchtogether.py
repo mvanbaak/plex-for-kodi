@@ -531,7 +531,12 @@ class WatchTogetherBridge(object):
             self.leave()
         elif not confirm_takeover(room):
             return
-        self.join(room.id)
+        try:
+            self.join(room.id)
+        except Exception as exc:
+            util.DEBUG_LOG("Watch Together: join failed: {0}".format(
+                exc.__class__.__name__))
+            util.showNotification(str(exc))
 
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None
