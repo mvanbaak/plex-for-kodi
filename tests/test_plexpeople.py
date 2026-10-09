@@ -94,3 +94,39 @@ def test_shared_users_gets_server_endpoint_with_token():
 def test_shared_users_degrades_on_bad_xml():
     assert plexpeople.shared_users("tok", "mid",
                                    http=lambda *a, **k: (200, "application/xml", b"<not xml")) == []
+
+
+def _pp(friends, sharees):
+    def http(method, url, headers, body=None):
+        if "community" in url:
+            return (200, "application/json", json.dumps({"data": {"allFriendsV2":
+                [{"user": {"idRaw": i, "displayName": t, "avatar": ""}} for i, t in friends]}}).encode())
+        return (200, "application/xml",
+                ("<MediaContainer>" + "".join('<SharedServer userID="%d" username="%s"/>' % (i, t) for i, t in sharees) + "</MediaContainer>").encode())
+    return http
+
+
+def test_own_server_intersects_friends_with_sharees():
+    http = _pp([(1, "a"), (2, "b"), (3, "c")], [(2, "b"), (3, "c"), (4, "d")])
+    out = plexpeople.eligible_invitees("tok", "mid", True, [{"id": 5, "title": "h", "thumb": ""}], self_id=9, http=http)
+    assert sorted(i.id for i in out) == [2, 3, 5]
+    assert all(not i.access_unknown for i in out)
+
+
+def test_shared_server_offers_all_friends_flagged():
+    http = _pp([(1, "a"), (2, "b")], [])
+    out = plexpeople.eligible_invitees("tok", "mid", False, [{"id": 5, "title": "h", "thumb": ""}], http=http)
+    assert sorted(i.id for i in out) == [1, 2, 5]
+    assert all(i.access_unknown for i in out)
+
+
+def test_excludes_self_and_room_members():
+    http = _pp([(1, "a"), (2, "b")], [(1, "a"), (2, "b")])
+    out = plexpeople.eligible_invitees("tok", "mid", True, [], self_id=1, room_user_ids=[2], http=http)
+    assert out == []
+
+
+def test_friends_failure_falls_back_to_home_users():
+    http = lambda *a, **k: (500, "text/html", b"")
+    out = plexpeople.eligible_invitees("tok", "mid", False, [{"id": 5, "title": "h", "thumb": ""}], http=http)
+    assert [i.id for i in out] == [5]

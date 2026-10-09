@@ -9,6 +9,7 @@ from __future__ import absolute_import
 
 import json
 import xml.etree.ElementTree as ET
+from collections import namedtuple
 
 try:
     from urllib.request import Request, urlopen
@@ -120,4 +121,45 @@ def shared_users(token, machine_id, http=None):
         except (ValueError, TypeError):
             continue
         out.append({"id": user_id, "title": node.get("username", "")})
+    return out
+
+
+Invitee = namedtuple("Invitee", "id title thumb access_unknown")
+
+
+def eligible_invitees(token, machine_id, owned, home_users, self_id=None,
+                      room_user_ids=(), http=None):
+    """People who can be invited to a Watch Together room on this server.
+
+    For a server the token holder *owns*, only friends who are also sharees of
+    that server can reach it, so the friend list is intersected with the shared
+    users by id. For a server shared *to* the holder, the sharee list cannot be
+    enumerated, so every friend is offered and flagged ``access_unknown=True``.
+    Home users are always offered. Self and anyone already in the room are
+    dropped; ids are deduplicated, friends before home users. Degrades to home
+    users alone if the friends lookup fails. Never logs the token or a body.
+    """
+    exclude = set(room_user_ids)
+    if self_id is not None:
+        exclude.add(self_id)
+
+    friends_list = friends(token, http=http)
+    rows = []
+    if owned and friends_list:
+        # Only sharees of the server can reach it; skip the lookup when there
+        # are no friends to intersect (degrades to home users alone).
+        allowed = set(u["id"] for u in shared_users(token, machine_id, http=http))
+        rows = [(f, False) for f in friends_list if f["id"] in allowed]
+    elif not owned:
+        rows = [(f, True) for f in friends_list]
+    rows.extend((h, not owned) for h in home_users)
+
+    out = []
+    seen = set()
+    for user, access_unknown in rows:
+        user_id = user["id"]
+        if user_id in exclude or user_id in seen:
+            continue
+        seen.add(user_id)
+        out.append(Invitee(user_id, user["title"], user["thumb"], access_unknown))
     return out
