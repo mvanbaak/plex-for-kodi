@@ -7,50 +7,67 @@ squash branch, like the spec and plan next to it.
 ## Where the squash branch stands
 
 `feature/watch-together-squash` is the branch for sharing outside this repo.
-Tree matches `feature/watch-together-impl`, with `docs/superpowers/` excluded
-(its whole directory, spec + plan + this file).
+Its tree matches `feature/watch-together-impl` **except** `docs/superpowers/`
+(the whole directory: specs, plans, this file) and `.gitignore` (the squash
+branch ignores `docs/superpowers/`; the impl branch tracks it — that one-line
+diff is expected and is the only non-`docs/superpowers/` difference).
 
-It currently holds Phase 1 as two commits on base `2707bbe7`:
+Base `2707bbe7` (`1.14.1`), then:
 
-- `c518970d` chore: uv dev tooling and Watch Together protocol research
-- `48469941` feat(watchtogether): Phase 1 protocol library
+- `27f7dda8` chore: uv dev tooling and Watch Together protocol research
+- `198cf1a3` feat(watchtogether): Phase 1 protocol library
+- `8a8ec00f` feat(watchtogether): Phase 2 Kodi UI integration  ← current tip
+
+**Not pushed.** The squash branch is local only; push it only when explicitly
+asked.
 
 ## Rules for future squashes
 
-1. **Everything up to `66f6eedd` on `feature/watch-together-impl` is already
-   squashed.** Do not re-squash those commits. The granular history exists on
-   the impl branch only and stays there.
+1. **Everything up to `51bd5141` on `feature/watch-together-impl` is already
+   squashed** (into `8a8ec00f`). Do not re-squash those commits. The granular
+   history lives on the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
-   commits (Phase 2: Kodi UI implementation).
-3. When it is time to update the shareable branch: squash **only the commits
-   added after `66f6eedd`**, and append the result to
-   `feature/watch-together-squash` as a single commit — the kodi-ui
-   implementation commit.
-4. After each such squash, verify the way Phase 1 was verified — the only
-   allowed tree difference between the squash branch and impl is
-   `docs/superpowers/`:
+   commits.
+3. To update the shareable branch, squash **only the commits added after
+   `51bd5141`** and append the result to `feature/watch-together-squash` as a
+   single commit. Recipe (run from the repo root):
 
    ```bash
-   git diff --name-only feature/watch-together-squash feature/watch-together-impl | grep -v '^docs/superpowers/' || echo "only superpowers differs"
+   # marker = current impl HEAD, the new "already squashed up to" point
+   MARKER=$(git rev-parse --short feature/watch-together-impl)
+
+   git checkout feature/watch-together-squash
+   git checkout feature/watch-together-impl -- .          # bring impl's tree
+   git rm -r --cached -q docs/superpowers && rm -rf docs/superpowers
+   git checkout HEAD -- .gitignore                        # keep the squash .gitignore
+   git add -A
+   git commit --no-gpg-sign -m "feat(watchtogether): <what changed>"
+
+   # verify (see rule 4)
+   git diff --name-only feature/watch-together-squash feature/watch-together-impl \
+       | grep -v '^docs/superpowers/' || echo "only superpowers differs"
+   uv run pytest -q
+   git checkout feature/watch-together-impl
    ```
 
-   Also run `uv run pytest -q` on the squash branch — 805 passed at Phase 1
-   exit, grow from there.
+   Then update rule 1's marker (`51bd5141` → `$MARKER`) and the "current tip"
+   above.
+4. Verification after every squash: the command in the recipe prints
+   **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
+   Baselines: 805 passed at Phase 1 exit, **945 passed at Phase 2 exit**.
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
-   branch — token hygiene rules from the spec apply: no token values
-   anywhere.
+   branch — token hygiene rules from the spec apply: no token values anywhere.
 
-## Phase 2 planning status
+## Follow-ups not yet squashed
 
-Phase 2 (P4+P5, Kodi UI integration) is fully specified and planned:
+After `8a8ec00f` (Phase 2 exit), the following are planned as new granular
+commits on `feature/watch-together-impl`, to be squashed later per rule 3:
 
-- Design spec: `docs/superpowers/specs/2026-10-08-watch-together-phase2-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-10-08-watch-together-phase2.md`
+- Leave / participants in the video player OSD (the OSD status label already
+  exists; add a Leave action next to it).
+- Leave / participants as a context menu on the room tile in the Home hub
+  (the WT `hubMenu` branch is currently a no-op).
 
-Both live under `docs/superpowers/`, so they never reach the squash branch.
-Squash mechanics for Phase 2 follow rules 1–5 above unchanged: when
-implementation on `feature/watch-together-impl` is complete, squash only the
-commits added after `66f6eedd` into a single
-`feat(watchtogether): Phase 2 Kodi UI integration` commit appended to
-`feature/watch-together-squash`, then verify with the tree diff and
-`uv run pytest -q` (baseline at Phase 1 exit: 805 passed).
+Known caveats shipped in `8a8ec00f`: tempo catch-up only truly applies on Kodi
+21.1+ (on 21.0 `Player.SetTempo` is refused; the bridge logs once and hard-seeks),
+and auto-join rejoins the session but does not auto-start playback.
