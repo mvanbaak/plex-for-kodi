@@ -64,8 +64,10 @@ After `8a8ec00f` (Phase 2 exit), these are new granular commits on
 `feature/watch-together-impl`, to be squashed later per rule 3:
 
 - `3e237459` room tile context menu — join / remove / info (done).
-- Leave / participants in the video player OSD (the OSD status label already
-  exists; add a Leave action next to it) — **still pending**.
+- `505ef628` Leave + Participants buttons in the video OSD (done).
+- `48a78163` templating staleness fix — cherry-picked to a separate branch
+  (`fix/template-staleness`, PR #299 against `pannal:develop_kodi21`); it is
+  NOT part of the WT squash.
 
 Known caveats shipped in `8a8ec00f`: tempo catch-up only truly applies on Kodi
 21.1+ (on 21.0 `Player.SetTempo` is refused; the bridge logs once and hard-seeks),
