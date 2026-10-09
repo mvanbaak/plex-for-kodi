@@ -3400,3 +3400,35 @@ msgstr ""
 msgctxt "#35061"
 msgid "Leave the current room and join this one?"
 msgstr ""
+
+msgctxt "#35062"
+msgid "Join"
+msgstr ""
+
+msgctxt "#35063"
+msgid "Remove"
+msgstr ""
+
+msgctxt "#35064"
+msgid "Info"
+msgstr ""
+
+msgctxt "#35065"
+msgid "Remove me from this room?"
+msgstr ""
+
+msgctxt "#35066"
+msgid "Watching"
+msgstr ""
+
+msgctxt "#35067"
+msgid "Participants"
+msgstr ""
+
+msgctxt "#35068"
+msgid "Live"
+msgstr ""
+
+msgctxt "#35069"
+msgid "Close"
+msgstr ""

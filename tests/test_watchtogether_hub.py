@@ -3,6 +3,8 @@
 
 from __future__ import absolute_import
 
+import json
+
 from kodienv import ENV
 
 ENV.abort_requested = True
@@ -311,3 +313,73 @@ class RoomClickedTest(KodiTestCase):
         finally:
             wtwin.util.showNotification = saved
         self.assertEqual(len(toasts), 1)
+
+
+class RoomInfoRowsTest(KodiTestCase):
+    def room(self):
+        return watchtogether.Room(ROOM)
+
+    def test_marks_live_users(self):
+        rows = wtwin.room_info_rows(self.room(), {"1"})
+        self.assertEqual([r["name"] for r in rows],
+                         ["Amanda & Michiel", "Alwin & Andréa"])
+        self.assertTrue(rows[0]["live"])
+        self.assertFalse(rows[1]["live"])
+        self.assertEqual(rows[0]["sub"], util.T(35068, "Live"))
+        self.assertEqual(rows[1]["sub"], "yogarine")
+
+    def test_thumb_is_passed_through(self):
+        room = watchtogether.Room(dict(
+            ROOM, users=[{"id": 1, "username": "u", "thumb": "http://a"}]))
+        self.assertEqual(wtwin.room_info_rows(room, set())[0]["thumb"], "http://a")
+
+
+class _LeaveAPI(object):
+    def __init__(self):
+        self.calls = []
+
+    def leave(self, room_id):
+        self.calls.append(room_id)
+
+
+class RemoveRoomTest(KodiTestCase):
+    def setUp(self):
+        super(RemoveRoomTest, self).setUp()
+        self.bridge = wtwin.WatchTogetherBridge()
+        self.room = watchtogether.Room(ROOM)
+
+    def test_not_in_room_deletes_and_drops_it(self):
+        api = _LeaveAPI()
+        self.bridge.api = api
+        self.bridge.rooms_cache = [self.room]
+        self.bridge.remove_room(self.room)
+        self.assertEqual(api.calls, [self.room.id])
+        self.assertEqual(self.bridge.rooms_cache, [])
+        self.assertEqual(self.bridge.rooms_version, 1)
+
+    def test_in_room_uses_leave(self):
+        api = _LeaveAPI()
+        self.bridge.api = api
+        self.bridge.room = self.room
+        self.bridge.supervisor = object()
+        left = []
+        self.bridge.leave = lambda: left.append(1)
+        self.bridge.remove_room(self.room)
+        self.assertEqual(left, [1])
+        self.assertEqual(api.calls, [], "leave() performs the DELETE")
+
+
+class LiveUserIdsTest(KodiTestCase):
+    def test_parses_the_roster_user_ids(self):
+        bridge = wtwin.WatchTogetherBridge()
+        roster = {
+            json.dumps({"deviceIdentifier": "d", "deviceName": "K",
+                        "userID": "1000001"}): {},
+            json.dumps({"deviceIdentifier": "e", "deviceName": "K",
+                        "userID": "1000002"}) + "__": {},
+        }
+        bridge.supervisor = type("Sup", (), {"session": type("S", (), {"roster": roster})()})()
+        self.assertEqual(bridge._live_user_ids(), {"1000001", "1000002"})
+
+    def test_no_supervisor_is_empty(self):
+        self.assertEqual(wtwin.WatchTogetherBridge()._live_user_ids(), set())

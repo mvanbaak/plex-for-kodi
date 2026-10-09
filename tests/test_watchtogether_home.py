@@ -209,3 +209,60 @@ class RefreshTest(KodiTestCase):
             self.assertEqual(len(win._shown), 1)
         finally:
             wt.bridge.rooms_version = saved
+
+
+class HubMenuTest(KodiTestCase):
+    def setUp(self):
+        super(HubMenuTest, self).setUp()
+        self.room = watchtogether.Room({"id": "r", "title": "Room",
+                                        "sourceUri": "", "users": []})
+        self._saved_dropdown = home.dropdown.showDropdown
+        self._saved_clicked = wtwin.bridge.room_clicked
+        self._saved_remove = wtwin.bridge.remove_room
+        self._saved_info = wtwin.show_room_info
+        self._saved_confirm = HomeWindow._confirm_remove_room
+
+    def tearDown(self):
+        home.dropdown.showDropdown = self._saved_dropdown
+        wtwin.bridge.room_clicked = self._saved_clicked
+        wtwin.bridge.remove_room = self._saved_remove
+        wtwin.show_room_info = self._saved_info
+        HomeWindow._confirm_remove_room = self._saved_confirm
+        super(HubMenuTest, self).tearDown()
+
+    def run_menu(self, key, confirm=True):
+        win = HomeWindow.__new__(HomeWindow)
+        win.hubControls = ()
+        home.dropdown.showDropdown = lambda *a, **k: ({"key": key} if key else None)
+        HomeWindow._confirm_remove_room = lambda self, room: confirm
+        win._watchtogether_hub_menu(self.room)
+
+    def test_join_calls_room_clicked(self):
+        calls = []
+        wtwin.bridge.room_clicked = calls.append
+        self.run_menu("wt_join")
+        self.assertEqual(calls, [self.room])
+
+    def test_remove_confirmed_removes(self):
+        removed = []
+        wtwin.bridge.remove_room = removed.append
+        self.run_menu("wt_remove", confirm=True)
+        self.assertEqual(removed, [self.room])
+
+    def test_remove_declined_does_nothing(self):
+        removed = []
+        wtwin.bridge.remove_room = removed.append
+        self.run_menu("wt_remove", confirm=False)
+        self.assertEqual(removed, [])
+
+    def test_info_opens_the_dialog(self):
+        opened = []
+        wtwin.show_room_info = opened.append
+        self.run_menu("wt_info")
+        self.assertEqual(opened, [self.room])
+
+    def test_cancel_does_nothing(self):
+        calls = []
+        wtwin.bridge.room_clicked = calls.append
+        self.run_menu(None)
+        self.assertEqual(calls, [])
