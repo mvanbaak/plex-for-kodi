@@ -12,19 +12,19 @@
     <texture colordiffuse="99606060" border="10">script.plex/white-square.png</texture>
 </control>
 <control type="group">
-    <posx>660</posx>
+    <posx>585</posx>
     <posy>{{ vperc(vscale(749)) }}</posy>
     <control type="image">
         <posx>-40</posx>
         <posy>{{ vscale(-40) }}</posy>
-        <width>680</width>
+        <width>830</width>
         <height>{{ vscale(749) }}</height>
         <texture border="42">script.plex/drop-shadow.png</texture>
     </control>
     <control type="image">
         <posx>0</posx>
         <posy>0</posy>
-        <width>600</width>
+        <width>750</width>
         <height>{{ vscale(80) }}</height>
         <texture border="10">script.plex/white-square-top-rounded.png</texture>
         <colordiffuse>F21F1F1F</colordiffuse>
@@ -32,7 +32,7 @@
     <control type="image">
         <posx>0</posx>
         <posy>{{ vscale(80) }}</posy>
-        <width>600</width>
+        <width>750</width>
         <height>{{ vscale(627) }}</height>
         <texture flipy="true" border="10">script.plex/white-square-top-rounded.png</texture>
         <colordiffuse>D3111111</colordiffuse>
@@ -40,7 +40,7 @@
     <control type="label">
         <posx>20</posx>
         <posy>0</posy>
-        <width>560</width>
+        <width>710</width>
         <height>{{ vscale(80) }}</height>
         <font>font12</font>
         <align>left</align>
@@ -51,7 +51,7 @@
     <control type="label">
         <posx>20</posx>
         <posy>{{ vscale(80) }}</posy>
-        <width>560</width>
+        <width>710</width>
         <height>{{ vscale(50) }}</height>
         <font>font10</font>
         <align>left</align>
@@ -62,7 +62,7 @@
     <control type="list" id="100">
         <posx>0</posx>
         <posy>{{ vscale(130) }}</posy>
-        <width>600</width>
+        <width>750</width>
         <height>{{ vscale(372) }}</height>
         <scrolltime>200</scrolltime>
         <orientation>vertical</orientation>
@@ -79,7 +79,7 @@
             <control type="label">
                 <posx>100</posx>
                 <posy>0</posy>
-                <width>380</width>
+                <width>530</width>
                 <height>{{ vscale(100) }}</height>
                 <font>font12</font>
                 <align>left</align>
@@ -93,7 +93,7 @@
                 <visible>!String.IsEmpty(ListItem.Property(access_unknown))</visible>
                 <posx>100</posx>
                 <posy>{{ vscale(55) }}</posy>
-                <width>380</width>
+                <width>530</width>
                 <height>{{ vscale(35) }}</height>
                 <font>font10</font>
                 <align>left</align>
@@ -102,7 +102,7 @@
                 <label>$ADDON[script.plexmod 35077]</label>
             </control>
             <control type="image">
-                <posx>520</posx>
+                <posx>670</posx>
                 <posy>{{ vscale(28) }}</posy>
                 <width>44</width>
                 <height>44</height>
@@ -110,7 +110,7 @@
             </control>
             <control type="image">
                 <visible>!String.IsEmpty(ListItem.Property(selected))</visible>
-                <posx>520</posx>
+                <posx>670</posx>
                 <posy>{{ vscale(28) }}</posy>
                 <width>44</width>
                 <height>44</height>
@@ -121,7 +121,7 @@
             <control type="image">
                 <posx>0</posx>
                 <posy>0</posy>
-                <width>600</width>
+                <width>750</width>
                 <height>{{ vscale(100) }}</height>
                 <texture colordiffuse="FFE5A00D">script.plex/white-square.png</texture>
             </control>
@@ -136,7 +136,7 @@
             <control type="label">
                 <posx>100</posx>
                 <posy>0</posy>
-                <width>380</width>
+                <width>530</width>
                 <height>{{ vscale(100) }}</height>
                 <font>font12</font>
                 <align>left</align>
@@ -150,7 +150,7 @@
                 <visible>!String.IsEmpty(ListItem.Property(access_unknown))</visible>
                 <posx>100</posx>
                 <posy>{{ vscale(55) }}</posy>
-                <width>380</width>
+                <width>530</width>
                 <height>{{ vscale(35) }}</height>
                 <font>font10</font>
                 <align>left</align>
@@ -159,7 +159,7 @@
                 <label>$ADDON[script.plexmod 35077]</label>
             </control>
             <control type="image">
-                <posx>520</posx>
+                <posx>670</posx>
                 <posy>{{ vscale(28) }}</posy>
                 <width>44</width>
                 <height>44</height>
@@ -167,7 +167,7 @@
             </control>
             <control type="image">
                 <visible>!String.IsEmpty(ListItem.Property(selected))</visible>
-                <posx>520</posx>
+                <posx>670</posx>
                 <posy>{{ vscale(28) }}</posy>
                 <width>44</width>
                 <height>44</height>
@@ -179,7 +179,7 @@
         <visible>!String.IsEmpty(Window.Property(empty))</visible>
         <posx>0</posx>
         <posy>{{ vscale(130) }}</posy>
-        <width>600</width>
+        <width>750</width>
         <height>{{ vscale(372) }}</height>
         <font>font12</font>
         <align>center</align>
@@ -191,7 +191,7 @@
         <defaultcontrol always="true">60</defaultcontrol>
         <posx>0</posx>
         <posy>{{ vscale(552) }}</posy>
-        <width>600</width>
+        <width>750</width>
         <height>{{ vscale(155) }}</height>
         <align>center</align>
         <itemgap>-50</itemgap>
@@ -204,7 +204,7 @@
             <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
             <posx>0</posx>
             <posy>0</posy>
-            <width min="180">auto</width>
+            <width min="240">auto</width>
             <height>{{ vscale(143) }}</height>
             <font>font10</font>
             <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
@@ -219,7 +219,7 @@
             <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
             <posx>0</posx>
             <posy>0</posy>
-            <width min="180">auto</width>
+            <width min="240">auto</width>
             <height>{{ vscale(143) }}</height>
             <font>font10</font>
             <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>

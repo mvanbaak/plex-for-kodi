@@ -92,6 +92,28 @@ class WatchTogetherButtonGeometryTest(KodiTestCase):
         """Guards the numbers above against the actual asset."""
         self.assertGreaterEqual(png_height(BUTTON_TEXTURE), 100)
 
+    def test_the_row_fits_three_buttons_at_their_minimum(self):
+        """The widest row in these dialogs is Invite/Start/Cancel. Kodi sizes an
+        auto button from its label and renders the text at textoffsetx inside
+        that width, so a row that cannot hold three buttons at their minimum
+        width squeezes them and the labels truncate to a couple of characters."""
+        for path in wt_templates():
+            text = read(path)
+            group = GROUPLIST_RE.search(text)
+            if not group:
+                continue
+            row = re.search(r"<width>(\d+)</width>", group.group(1))
+            gap = re.search(r"<itemgap>(-?\d+)</itemgap>", group.group(1))
+            mins = [int(m.group(1)) for m in
+                    (re.search(r'<width min="(\d+)"', b) for b in BUTTON_RE.findall(text)) if m]
+            if not (row and gap and mins):
+                continue
+            with self.subTest(template=os.path.basename(path)):
+                self.assertGreaterEqual(
+                    int(row.group(1)), 3 * max(mins) + 2 * int(gap.group(1)),
+                    "the button row cannot hold three buttons at their minimum "
+                    "width, so the grouplist squeezes them and labels truncate")
+
     def test_the_list_and_the_button_row_are_wired_together(self):
         """Every dialog with both a list and a button row must let a remote
         leave the list downwards, and come back up."""
