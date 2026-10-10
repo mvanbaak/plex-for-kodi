@@ -522,6 +522,8 @@ class WatchTogetherBridge(object):
         sup = self.supervisor
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
+        util.DEBUG_LOG("Watch Together: open lobby host={0} hosting={1} room={2}".format(
+            host, self._hosting, bool(self.room)))
         self.lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
                                         live_ids=self._live_user_ids(), host=host)
 
@@ -1247,6 +1249,8 @@ class LobbyDialog(kodigui.BaseDialog):
         self.is_host = bool(kwargs.get('host'))
 
     def onFirstInit(self):
+        util.DEBUG_LOG("Watch Together: lobby onFirstInit is_host={0} room={1}".format(
+            self.is_host, bool(self.room)))
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
         room = self.room
         self.setProperty('watching', room.title if room else '')
