@@ -46,14 +46,14 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 
 ## Rules for future squashes
 
-1. **Everything up to `f67fcc89` on `feature/watch-together-impl` is already
+1. **Everything up to `640f7e8a` on `feature/watch-together-impl` is already
    squashed** (into the squash branch: `fcb146b6`, `a49018d1`, then
    `e3feea9d`). Do not re-squash those commits. The granular history lives on
    the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
-   `f67fcc89`** and append the result to `feature/watch-together-squash` as a
+   `640f7e8a`** and append the result to `feature/watch-together-squash` as a
    single commit. Recipe (run from the repo root):
 
    ```bash
@@ -103,7 +103,7 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 
 ## Follow-ups not yet squashed
 
-Squashed into `e3feea9d` (impl marker `f67fcc89`): the v2 host capability —
+Squashed into `e3feea9d` (impl marker `640f7e8a`): the v2 host capability —
 `RoomsApi.create`/`invite`, the `plexpeople` eligibility helper (community
 GraphQL friends + server sharees), the `syncplay` ready callback, the host flow
 + `LobbyDialog`, the `InviteDialog` picker, home menu entries, the guest lobby,
