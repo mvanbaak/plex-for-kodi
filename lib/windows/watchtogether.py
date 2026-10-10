@@ -1272,48 +1272,42 @@ class LobbyDialog(kodigui.BaseDialog):
 
     def onFirstInit(self):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
-        self._pending = None
         room = self.room
         self.setProperty('watching', room.title if room else '')
         self.setBoolProperty('is_host', self.is_host)
-        self._queue_rows()               # first paint
         self._sync()
         self.setFocusId(self.START_ID if self.is_host else self.LEAVE_ID)
 
     def refresh(self):
-        """Recompute the participant rows off the supervisor thread and ask the
-        owning UI thread to repaint. Never touches the native list here: a
-        dialog can be closed while a callback still holds it, and a Python
-        try/except cannot make a stale native control valid."""
+        """Re-read the roster and repaint (called from the supervisor thread on
+        a roster/readiness change — never raise). Membership comes from
+        bridge.room in _sync, so an invitee added by the 15 s poll appears.
+
+        Kodi only delivers onNotification to xbmc.Monitor, never to a window
+        (see Kodi's Window.h callback list), so there is no UI-thread hand-off
+        to queue into here: _sync rejects the work once the dialog is closing,
+        which is the state a stale callback would otherwise corrupt."""
         if getattr(self, 'peopleList', None) is None:
             return          # window not initialised yet: nothing to repaint
         sup = bridge.supervisor
         if sup is not None and sup.session is not None:
             self.roster = sup.session.roster
-        self._queue_rows()
-        # NotifyAll runs this window's onNotification on the main thread
-        xbmc.executebuiltin('NotifyAll(wt-lobby, refresh)')
-
-    def onNotification(self, sender, method, data):
-        if sender == 'wt-lobby' and method == 'refresh':
+        try:
             self._sync()
-
-    def _queue_rows(self):
-        # the open lobby must follow the bridge's live room (on_roster replaces
-        # it every 15 s); self.room is only the fallback before the first poll
-        room = bridge.room or self.room
-        self._pending = lobby_rows(room, self.roster)
+        except Exception:
+            # never tear down the supervisor thread that called us
+            util.ERROR()
 
     def _sync(self):
-        """Repaint the participant list. Main thread only."""
-        if self._closing or self._pending is None:
-            return
-        rows, self._pending = self._pending, None
+        if self._closing:
+            return          # closed while a callback still held this dialog
+        # the open lobby must follow the bridge's live room (on_roster replaces
+        # it every 15 s); self.room is only the fallback before the first poll
         room = bridge.room or self.room
         items = [kodigui.ManagedListItem(row['title'], row['status'],
                                          thumbnailImage=row['thumb'],
                                          data_source=room)
-                 for row in rows]
+                 for row in lobby_rows(room, self.roster)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
@@ -1398,13 +1392,7 @@ class InviteDialog(kodigui.BaseDialog):
             util.ERROR()
             invitees = []
         self._invitees = invitees
-        # NotifyAll runs onNotification on the main thread: the native list is
-        # only ever touched there (the worker may outlive the dialog)
-        xbmc.executebuiltin('NotifyAll(wt-invite, refresh)')
-
-    def onNotification(self, sender, method, data):
-        if sender == 'wt-invite' and method == 'refresh':
-            self._sync()
+        self._sync()
 
     def _sync(self):
         if getattr(self, "_closing", False):
