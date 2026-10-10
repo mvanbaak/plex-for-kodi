@@ -486,7 +486,7 @@ class WatchTogetherBridge(object):
                 # which would orphan the room we just created and leave
                 # self.room stale
                 self.leave()
-            self.join(room.id)
+            self.join(room.id, hosting=True)
         except watchtogether.WatchTogetherError as exc:
             # created but never joined: DELETE the orphan before reporting
             self._host_failed(exc)
@@ -871,7 +871,7 @@ class WatchTogetherBridge(object):
 
     # -- join / leave -----------------------------------------------------------
 
-    def join(self, room_id):
+    def join(self, room_id, hosting=False):
         with self._join_lock:
             if self.supervisor is not None:
                 return self.supervisor
@@ -892,12 +892,14 @@ class WatchTogetherBridge(object):
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor
+            # set before start(): the supervisor connects immediately and a
+            # relay State must not run the guest-lobby path for the host
+            self._hosting = hosting
             sup.start()
             self.room = room
             self.supervisor = sup
             self._was_connected = False
             self._started = False
-            self._hosting = False
             pl = _player()
             if pl is not None:
                 pl.wt_broadcast = self.on_local_change
@@ -1275,6 +1277,18 @@ class LobbyDialog(kodigui.BaseDialog):
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
+    def onAction(self, action):
+        if action in (xbmcgui.ACTION_PREVIOUS_MENU, xbmcgui.ACTION_NAV_BACK):
+            # ESC/back: close the lobby and leave, instead of falling through
+            # to the video window's stop (which left the modal lobby up on a
+            # grey screen)
+            if self.is_host:
+                bridge.cancel_hosting()
+            else:
+                bridge.leave()
+            return
+        kodigui.BaseDialog.onAction(self, action)
+
     def onClick(self, controlID):
         if controlID == self.INVITE_ID:
             self._invite()
@@ -1363,6 +1377,12 @@ class InviteDialog(kodigui.BaseDialog):
     def _selected_ids(self):
         return [item.dataSource for item in self.peopleList.items
                 if item.getProperty("selected")]
+
+    def onAction(self, action):
+        if action in (xbmcgui.ACTION_PREVIOUS_MENU, xbmcgui.ACTION_NAV_BACK):
+            self.doClose()
+            return
+        kodigui.BaseDialog.onAction(self, action)
 
     def onClick(self, controlID):
         if controlID == self.LIST_ID:

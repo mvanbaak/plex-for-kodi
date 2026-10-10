@@ -191,7 +191,7 @@
         <label>$ADDON[script.plexmod 35074]</label>
     </control>
     <control type="grouplist" id="50">
-        <defaultcontrol always="true">61</defaultcontrol>
+        <defaultcontrol>61</defaultcontrol>
         <posx>0</posx>
         <posy>{{ vscale(552) }}</posy>
         <width>600</width>

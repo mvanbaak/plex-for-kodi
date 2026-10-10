@@ -338,6 +338,30 @@ class LobbyDialogTest(KodiTestCase):
                               live_ids=set(), host=True)
         self.assertIs(d.is_host, True)
 
+    def test_lobby_back_cancels_for_the_host(self):
+        calls = []
+        saved = wtwin.bridge.cancel_hosting
+        wtwin.bridge.cancel_hosting = lambda: calls.append("cancel")
+        try:
+            d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                                  live_ids=set(), host=True)
+            d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
+        finally:
+            wtwin.bridge.cancel_hosting = saved
+        self.assertEqual(calls, ["cancel"])
+
+    def test_lobby_back_leaves_for_a_guest(self):
+        calls = []
+        saved = wtwin.bridge.leave
+        wtwin.bridge.leave = lambda: calls.append("leave")
+        try:
+            d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                                  live_ids=set(), host=False)
+            d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
+        finally:
+            wtwin.bridge.leave = saved
+        self.assertEqual(calls, ["leave"])
+
     def test_lobby_dialog_syncs_title_and_status_rows(self):
         room = FakeRoom(users=[{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
 
@@ -663,10 +687,11 @@ class HostFlowTest(BridgeTestCase):
         wtwin.busy.BusyWindow = self._saved_busy_window
         super(HostFlowTest, self).tearDown()
 
-    def _fake_join(self, room_id):
+    def _fake_join(self, room_id, hosting=False):
         if self.bridge.supervisor is not None:
             return self.bridge.supervisor   # mirrors join()'s early return
         self.joined.append(room_id)
+        self.bridge._hosting = hosting
         self.bridge.room = watchtogether.Room(ROOM_JSON)
 
     def test_host_creates_room_with_item_source_uri(self):
@@ -766,7 +791,7 @@ class HostFlowTest(BridgeTestCase):
     def test_host_leaves_the_created_room_when_join_fails(self):
         # create succeeded but the follow-up join failed: DELETE the orphan
         # and report, instead of leaving a room nobody is in
-        def boom(room_id):
+        def boom(room_id, hosting=False):
             raise watchtogether.RoomGone("gone")
         self.bridge.join = boom
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
@@ -840,6 +865,19 @@ class HostFlowTest(BridgeTestCase):
                          "cancel must DELETE (leave), never destroy")
         self.assertTrue(lobby.closed)
         self.assertIsNone(self.bridge.lobby)
+
+    def test_guest_lobby_is_not_opened_for_the_host(self):
+        # a relay State arriving during join() must not open the guest lobby
+        self.bridge._hosting = True
+        opened = []
+        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+        self.bridge._update_guest_lobby({"paused": True, "position": 0.0})
+        self.assertEqual(opened, [])
+
+    def test_host_sets_the_hosting_state(self):
+        self.bridge._lobby_when_playing = lambda: None    # don't race the thread
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertTrue(self.bridge._hosting)
 
 
 class GuestLobbyTest(BridgeTestCase):
