@@ -879,19 +879,17 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
         self.assertTrue(self.bridge._hosting)
 
-    def test_open_lobby_initialises_the_non_modal_dialog(self):
-        # create(show=True) never fires onInit(); _open_lobby must run it or
-        # the lobby renders in guest mode with no focus
+    def test_open_lobby_shows_modally(self):
+        # a non-modal show() leaves focus on the video (buttons unclickable,
+        # ESC goes to the video), so the lobby must be shown modally
+        made = []
+
         class FakeDialog(object):
             def __init__(self):
-                self.started = False
-                self.inits = 0
+                self.modalled = False
 
-            def _onInit(self):
-                self.inits += 1
-                self.started = True
-
-        made = []
+            def modal(self):
+                self.modalled = True
 
         class FakeLobbyDialog(object):
             @staticmethod
@@ -906,8 +904,13 @@ class HostFlowTest(BridgeTestCase):
             self.bridge._open_lobby(host=True)
         finally:
             wtwin.LobbyDialog = saved
-        self.assertEqual(made[0].inits, 1)
         self.assertIs(self.bridge.lobby, made[0])
+        # modal() runs on a helper thread (it blocks)
+        for _ in range(50):
+            if made[0].modalled:
+                break
+            time.sleep(0.01)
+        self.assertTrue(made[0].modalled, "the lobby must be opened modally")
 
 
 class GuestLobbyTest(BridgeTestCase):

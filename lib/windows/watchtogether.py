@@ -516,26 +516,33 @@ class WatchTogetherBridge(object):
         plexpeople.VERSION = util.ADDON.getAddonInfo("version")
 
     def _open_lobby(self, host=True):
-        """Show the lobby over the video. Non-modal (create, not open):
-        videoplayer.play() blocks right after, so a modal dialog would
-        deadlock. `host=False` is the guest's read-only variant (Task 11)."""
+        """Show the lobby over the video, **modally** so it takes input focus.
+
+        A non-modal show() leaves focus on the video window: the buttons are
+        unclickable and ESC goes to the video. The video is already up by the
+        time this runs (see _open_paused), so the modal dialog no longer blocks
+        the video from activating. modal() blocks, so it runs on its own
+        thread; this returns once the dialog is up."""
         sup = self.supervisor
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
         util.DEBUG_LOG("Watch Together: open lobby host={0} hosting={1} room={2}".format(
             host, self._hosting, bool(self.room)))
-        lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
+        lobby = LobbyDialog.create(show=False, room=self.room, roster=roster,
                                    live_ids=self._live_user_ids(), host=host)
-        # create(show=True) on a WindowXMLDialog does not fire Kodi's onInit(),
-        # so the dialog is never initialised: is_host/watching stay unset (it
-        # renders in guest mode) and no control is focused (ESC falls through
-        # to the video). Run the init ourselves.
-        if not lobby.started:
+        self.lobby = lobby
+
+        # modal() blocks until the lobby closes; run it on its own thread so
+        # callers (the supervisor's state loop, the host's play thread) are free
+        def run_modal():
             try:
-                lobby._onInit()
+                lobby.modal()
             except Exception:
                 util.ERROR()
-        self.lobby = lobby
+
+        thread = threading.Thread(target=run_modal, name="wt-lobby")
+        thread.daemon = True
+        thread.start()
 
     def _close_lobby(self):
         lobby, self.lobby = self.lobby, None
