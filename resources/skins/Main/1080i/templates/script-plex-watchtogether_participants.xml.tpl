@@ -188,7 +188,8 @@
             <font>font10</font>
             <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
             <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
-            <textoffsetx>70</textoffsetx>
+            <align>center</align>
+            <textoffsetx>0</textoffsetx>
             <textcolor>FF000000</textcolor>
             <focusedcolor>FF000000</focusedcolor>
             <label>$ADDON[script.plexmod 35069]</label>
@@ -203,7 +204,8 @@
             <font>font10</font>
             <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
             <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
-            <textoffsetx>70</textoffsetx>
+            <align>center</align>
+            <textoffsetx>0</textoffsetx>
             <textcolor>FF000000</textcolor>
             <focusedcolor>FF000000</focusedcolor>
             <label>$ADDON[script.plexmod 35056]</label>
