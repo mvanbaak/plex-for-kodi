@@ -378,6 +378,7 @@ class LobbyDialogTest(KodiTestCase):
 
         d = wtwin.LobbyDialog(room=room, roster={}, host=True)
         d.peopleList = FakeList()
+        d._queue_rows()
         d._sync()
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
         self.assertEqual([i.label2 for i in d.peopleList.items],
@@ -410,10 +411,42 @@ class LobbyDialogTest(KodiTestCase):
                 {"id": "r", "users": [{"id": 1, "title": "A"},
                                       {"id": 2, "title": "B"}]})
             d.refresh()
+            d.onNotification('wt-lobby', 'refresh', None)   # the UI-thread drain
         finally:
             wtwin.bridge.room = saved_room
             wtwin.bridge.supervisor = saved_sup
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
+
+    def test_refresh_queues_and_never_touches_the_list_off_thread(self):
+        # the supervisor thread must not mutate the native list: refresh()
+        # only queues rows and asks the UI thread to repaint
+        class FakeList(object):
+            def __init__(self):
+                self.items = []
+
+            def reset(self):
+                self.items = []
+
+            def addItems(self, items):
+                self.items += items
+
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[{"id": 1, "title": "A"}]),
+                              roster={}, host=True)
+        d.peopleList = FakeList()
+        d._queue_rows()
+        d._sync()                       # initial paint
+        before = list(d.peopleList.items)
+        calls = []
+        saved = wtwin.xbmc.executebuiltin
+        wtwin.xbmc.executebuiltin = calls.append
+        try:
+            d.refresh()
+        finally:
+            wtwin.xbmc.executebuiltin = saved
+        self.assertEqual(d.peopleList.items, before, "list untouched off-thread")
+        self.assertTrue(any('NotifyAll' in c for c in calls), "UI repaint queued")
+        d.onNotification('wt-lobby', 'refresh', None)
+        self.assertEqual([i.label for i in d.peopleList.items], ["A"])
 
 
 class InviteRowsTest(KodiTestCase):
@@ -473,7 +506,6 @@ class InviteDialogTest(KodiTestCase):
     def test_fetch_degrades_when_invitees_raises(self):
         # a people lookup failure must not break the picker
         saved = wtwin.bridge.invitees
-        synced = []
 
         def boom(*a, **k):
             raise ValueError("people lookup failed")
@@ -481,12 +513,12 @@ class InviteDialogTest(KodiTestCase):
         wtwin.bridge.invitees = boom
         try:
             d = self.dialog()
-            d._sync = lambda: synced.append(True)
             d._fetch()
+            d.onNotification('wt-invite', 'refresh', None)   # the UI-thread drain
         finally:
             wtwin.bridge.invitees = saved
         self.assertEqual(d._invitees, [])
-        self.assertEqual(synced, [True])
+        self.assertEqual(d.peopleList.items, [], "an empty picker, not a crash")
 
     def test_fetch_uses_the_dialog_room(self):
         # a picker opened from a room tile must query that tile's room, not
