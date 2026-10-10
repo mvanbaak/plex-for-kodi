@@ -21,7 +21,13 @@ rewrite**; the pre-rewrite SHAs `27f7dda8`/`198cf1a3`/`8a8ec00f`/`84e9d3a8`/
 - `5eeebc88` feat(watchtogether): Phase 1 protocol library
 - `fcb146b6` feat(watchtogether): Phase 2 Kodi UI integration
 - `a49018d1` feat(watchtogether): hub room menu, OSD controls, dialogs
-- `e3feea9d` feat(watchtogether): host capability — create, invite, lobby  ← current tip
+- `e3feea9d` feat(watchtogether): host capability — create, invite, lobby
+- `304c7fc2` fix(watchtogether): review fixes — ownership, supervisor binding,
+  readiness, UI-thread repaint, localization  ← current tip
+
+The `304c7fc2` squash was appended on 2026-10-10 as a plain fast-forward (its
+parent is `e3feea9d`, which was the remote tip), so **no force-push was
+needed** for the review fixes.
 
 **Pushed** to `origin` (the fork) and open as **PR #300** against
 `pannal:develop_kodi21` (`mvanbaak:feature/watch-together-squash`). The branch
@@ -46,10 +52,10 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 
 ## Rules for future squashes
 
-1. **Everything up to `640f7e8a` on `feature/watch-together-impl` is already
-   squashed** (into the squash branch: `fcb146b6`, `a49018d1`, then
-   `e3feea9d`). Do not re-squash those commits. The granular history lives on
-   the impl branch only and stays there.
+1. **Everything up to `16b113ab` on `feature/watch-together-impl` is already
+   squashed** (into the squash branch: `fcb146b6`, `a49018d1`, `e3feea9d`,
+   then `304c7fc2`). Do not re-squash those commits. The granular history lives
+   on the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
@@ -87,7 +93,9 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 4. Verification after every squash: the command in the recipe prints
    **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
    Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit, 956 at the
-   `a49018d1` squash, **1050 at the `e3feea9d` squash**.
+   `a49018d1` squash, 1050 at the `e3feea9d` squash, **1062 at the `304c7fc2`
+   squash** (1063 on impl — the templated staleness test lives in
+   `tests/test_templates.py`, which the squash branch excludes).
 
    **Also run a whole-tree redaction grep before pushing — not just `docs/`.**
    The 2026-10-10 leak lived in test fixtures (`tests/test_syncplay.py`,
@@ -110,6 +118,14 @@ GraphQL friends + server sharees), the `syncplay` ready callback, the host flow
 the whole-branch review fixes, and the live-test fixes (host lobby mode, lobby
 over Home, ESC handling, friend-name fallback, focus defaults, diagnostics
 strip). Nothing outstanding.
+
+Squashed into `304c7fc2` (impl marker `16b113ab`): the whole-branch review
+fixes from `pannal` — playback ownership (only sync the room's own video),
+supervisor binding (every callback bound to its session, so a stale roster
+cannot replace the current room), host-lobby readiness + tempo restore, the
+lobby/invite repaint on the owning UI thread, and the localization move
+(WT ids off #290's `35070`/`35071`, now `35086`/`35087`) plus the German
+entries. Nothing outstanding.
 
 Still separate: the templating staleness fix (`48a78163`) — cherry-picked to
 `fix/template-staleness` (PR #299 against `pannal:develop_kodi21`); NOT part of
@@ -140,8 +156,6 @@ Rule 6 requires this to be pasted (and kept current) into the PR description
 when `feature/watch-together-squash` is pushed. Copy from the block below.
 
 ```markdown
-# Plex Watch Together — Home hub, join/leave, host lobby
-
 Adds Plex Watch Together to PM4K.
 
 **Guest**
@@ -185,4 +199,20 @@ Adds Plex Watch Together to PM4K.
   on startup but the user still starts playback themselves.
 
 Not included: the templating staleness fix, tracked separately (PR #299).
+
+## Review feedback addressed
+
+- **Playback ownership** — the bridge now syncs only playback it owns, so an
+  unrelated video playing on the same client is ignored.
+- **Supervisor binding** — every session callback is bound to its own
+  supervisor, so a stale roster from a previous room can no longer replace the
+  current one.
+- **Host-lobby readiness** — readiness no longer reports `False` when every
+  member is ready, and the playback tempo is restored when leaving.
+- **Lobby repaint** — the lobby and invite picker now repaint on the owning UI
+  thread (`refresh()` only queues rows), so a callback can no longer touch a
+  closed dialog's controls.
+- **Localization** — the Watch Together string ids were moved off the range
+  claimed by the multi-server-home-rail work (#290) and the missing German
+  entries were added.
 ```
