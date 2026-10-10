@@ -208,7 +208,7 @@ def confirm_leave():
     from . import optionsdialog
     button = optionsdialog.show(
         util.T(35056, "Leave room"),
-        util.T(35070, "Leave this Watch Together room?"),
+        util.T(35086, "Leave this Watch Together room?"),
         util.T(32328, "Yes"),
         util.T(32329, "No"))
     return button == 0
