@@ -667,6 +667,31 @@ class AutoStartTest(BridgeTestCase):
         self.assertEqual(self.player.controls, [])
         self.assertEqual(getattr(self.bridge.supervisor, "sent_now", 0), 0)
 
+    def test_host_is_ready_in_the_home_lobby(self):
+        # host() waits in the lobby with no video; the 1 s tick's _update_ready
+        # must not overwrite the host's readiness with False
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._started = False
+        self.player.video = None
+        self.bridge._update_ready(sup)
+        self.assertTrue(self.bridge._player_ready)
+        self.assertTrue(sup.ready)
+
+    def test_host_auto_start_after_a_readiness_tick(self):
+        # the full sequence the review reproduced: tick readiness, then
+        # auto-start once every invited member is ready
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._started = False
+        self.bridge.room = self.room([1, 2])
+        self.player.video = None
+        self.bridge._update_ready(sup)                    # the 1 s tick
+        self.fire_ready({
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": True}})
+        self.assertIn("play", self.player.controls, "auto-start fires")
+
     def test_auto_start_holds_until_self_is_ready(self):
         self.bridge.supervisor = FakeSupervisor()
         self.bridge.room = self.room([1])
@@ -1373,6 +1398,23 @@ class TempoTest(BridgeTestCase):
             wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
         self.assertEqual(calls, [(1, 0.95), (1, 1.0)], "slow then reset")
         self.assertEqual(self.player.seek_times, [], "tempo needs no seek")
+
+    def test_teardown_restores_normal_tempo(self):
+        # leaving via the OSD keeps the video running; a catch-up must not
+        # leave it slowed after sync has ended
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))   # applies 0.95
+            self.assertEqual(self.bridge._tempo, 0.95)
+            self.bridge.disconnect()
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertIn((1, 1.0), calls, "normal tempo restored on teardown")
+        self.assertEqual(self.bridge._tempo, 1.0)
 
     def test_old_kodi_degrades_to_a_seek(self):
         saved_major = wtwin.util.KODI_VERSION_MAJOR

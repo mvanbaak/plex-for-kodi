@@ -420,7 +420,15 @@ class WatchTogetherBridge(object):
         })
 
     def _update_ready(self, sup):
-        """§6.4: ready when the room's own video is loaded and not buffering."""
+        """§6.4: ready when the room's own video is loaded and not buffering.
+
+        The host waiting in the Home lobby has no video yet, so that state
+        counts as ready too — host() sets it, but the 1 s tick would otherwise
+        overwrite it with False and auto-start would never fire."""
+        if self._hosting and not self._started:
+            self._player_ready = True
+            sup.set_ready(True)
+            return
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
                      and self._owns_playback()
@@ -1068,6 +1076,12 @@ class WatchTogetherBridge(object):
         self.join(room_id)
 
     def _reset_player_link(self, forget_room=False):
+        # restore normal speed before detaching: a remote catch-up may have
+        # left the player at 0.95, and leaving via the OSD keeps the video
+        # running, so it would stay slowed after sync has ended
+        if self._tempo != 1.0:
+            self._set_tempo(1.0)
+        self._tempo = 1.0
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
         self._started = False
