@@ -879,6 +879,36 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
         self.assertTrue(self.bridge._hosting)
 
+    def test_open_lobby_initialises_the_non_modal_dialog(self):
+        # create(show=True) never fires onInit(); _open_lobby must run it or
+        # the lobby renders in guest mode with no focus
+        class FakeDialog(object):
+            def __init__(self):
+                self.started = False
+                self.inits = 0
+
+            def _onInit(self):
+                self.inits += 1
+                self.started = True
+
+        made = []
+
+        class FakeLobbyDialog(object):
+            @staticmethod
+            def create(**kwargs):
+                d = FakeDialog()
+                made.append(d)
+                return d
+
+        saved = wtwin.LobbyDialog
+        wtwin.LobbyDialog = FakeLobbyDialog
+        try:
+            self.bridge._open_lobby(host=True)
+        finally:
+            wtwin.LobbyDialog = saved
+        self.assertEqual(made[0].inits, 1)
+        self.assertIs(self.bridge.lobby, made[0])
+
 
 class GuestLobbyTest(BridgeTestCase):
     """The read-only lobby a guest sees while a joined room is unstarted.
@@ -891,6 +921,14 @@ class GuestLobbyTest(BridgeTestCase):
         super(GuestLobbyTest, self).setUp()
         self.bridge.supervisor = FakeSupervisor()
         self.bridge.room = watchtogether.Room(ROOM_JSON)
+        # the dialog itself is covered by LobbyDialogTest; here we test the
+        # guest-lobby heuristic, so stub the open (a real create()+_onInit
+        # needs a Kodi window)
+        def open_lobby(host=True):
+            lobby = FakeLobby()
+            lobby.is_host = host
+            self.bridge.lobby = lobby
+        self.bridge._open_lobby = open_lobby
 
     def state(self, position, paused):
         return {"position": position, "paused": paused, "doSeek": False,

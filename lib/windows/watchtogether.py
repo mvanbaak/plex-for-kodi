@@ -524,8 +524,18 @@ class WatchTogetherBridge(object):
             if sup is not None and sup.session is not None else {}
         util.DEBUG_LOG("Watch Together: open lobby host={0} hosting={1} room={2}".format(
             host, self._hosting, bool(self.room)))
-        self.lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
-                                        live_ids=self._live_user_ids(), host=host)
+        lobby = LobbyDialog.create(show=True, room=self.room, roster=roster,
+                                   live_ids=self._live_user_ids(), host=host)
+        # create(show=True) on a WindowXMLDialog does not fire Kodi's onInit(),
+        # so the dialog is never initialised: is_host/watching stay unset (it
+        # renders in guest mode) and no control is focused (ESC falls through
+        # to the video). Run the init ourselves.
+        if not lobby.started:
+            try:
+                lobby._onInit()
+            except Exception:
+                util.ERROR()
+        self.lobby = lobby
 
     def _close_lobby(self):
         lobby, self.lobby = self.lobby, None
