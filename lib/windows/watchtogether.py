@@ -433,13 +433,15 @@ class WatchTogetherBridge(object):
         """Start the room: unpause self (§6.4). The local-change path then
         broadcasts paused:false, so guests unpause via _apply_remote. Closes
         the lobby (manual Start and auto-start both land here)."""
+        if self._started:
+            return          # idempotent: auto-start can race on two threads
+        self._started = True
         pl = _player()
         if pl is not None:
             pl.control("play")
         sup = self.supervisor
         if sup is not None:
             sup.send_now()
-        self._started = True
         self._close_lobby()
 
     # -- host flow -----------------------------------------------------------
@@ -582,13 +584,17 @@ class WatchTogetherBridge(object):
         if room is None:
             return list(user_ids)
         failed = []
+        invited = False
         for user_id in user_ids:
             try:
                 self.ensure_api().invite(room.id, [user_id])
+                invited = True
             except watchtogether.AuthError:
                 raise
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
+        if invited and room is self.room:
+            self.refresh_room()     # pull the new members into the open lobby
         return failed
 
     def invitees(self, room=None):
@@ -604,11 +610,12 @@ class WatchTogetherBridge(object):
         account = plexapp.ACCOUNT
         if room is None or account is None:
             return []
-        home = self._home_user_dicts(account)
         machine_id, _ = parse_source_uri(room.source_uri)
         owned = self._server_owned(machine_id)
         self._ensure_people_identity()
+        home = []
         try:
+            home = self._home_user_dicts(account)
             return plexpeople.eligible_invitees(
                 account.authToken, machine_id, owned, home,
                 self_id=account.ID, room_user_ids=room.user_ids)
@@ -1280,10 +1287,11 @@ class LobbyDialog(kodigui.BaseDialog):
 
     def _invite(self):
         # Task 9 provides InviteDialog; open it when present so the lobby does
-        # not hard-depend on it landing first.
+        # not hard-depend on it landing first. Prefer the bridge's live room:
+        # self.room is the snapshot taken when the lobby opened.
         invite_dialog = globals().get('InviteDialog')
         if invite_dialog is not None:
-            invite_dialog.open(room=self.room)
+            invite_dialog.open(room=bridge.room or self.room)
 
     def doClose(self, **kw):
         if bridge.lobby is self:

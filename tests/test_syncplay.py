@@ -356,7 +356,7 @@ class SessionTest(unittest.TestCase):
         seen = []
         s = syncplay.Session("room", "me", on_ready=lambda k, v: seen.append((k, v)))
         s.on_message({"Set": {"ready": {"username": "u", "isReady": True}}})
-        assert seen and seen[-1][1] is True
+        assert seen and seen[-1] == ("u", True)
 
     def test_ready_member_ids_and_members_ready(self):
         roster = {

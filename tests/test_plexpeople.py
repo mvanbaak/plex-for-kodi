@@ -160,3 +160,10 @@ def test_friends_failure_falls_back_to_home_users():
     http = lambda *a, **k: (500, "text/html", b"")
     out = plexpeople.eligible_invitees("tok", "mid", False, [{"id": 5, "title": "h", "thumb": ""}], http=http)
     assert [i.id for i in out] == [5]
+
+
+def test_http_never_raises_on_a_failed_request():
+    # the injectable contract: a failed request degrades to an empty result
+    status, _ct, body = plexpeople._http("GET", "http://127.0.0.1:1/nope", {})
+    assert status == 0
+    assert body == b""

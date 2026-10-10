@@ -557,6 +557,30 @@ class InviteeSourceTest(BridgeTestCase):
             wtwin.plexpeople.friends = saved_friends
         self.assertEqual(out[0].title, "alice")
 
+    def test_invitees_excludes_self(self):
+        # self must never be offered as an invitee (invite self is a 400)
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 9, "title": "Me", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: [
+            {"id": 9, "title": "Me", "thumb": ""},
+            {"id": 5, "title": "Friend", "thumb": ""}]
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual([i.id for i in out], [5])
+
     def test_invitees_uses_an_explicit_room(self):
         saved_account = wtwin.plexapp.ACCOUNT
         saved_friends = wtwin.plexpeople.friends
@@ -825,6 +849,30 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.supervisor = FakeSupervisor()
         self.bridge.start_playback()
         self.assertEqual(self.player.controls, ["play"])
+
+    def test_start_playback_is_idempotent(self):
+        # auto-start can race on two threads; the second call must be a no-op
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+
+    def test_invite_refreshes_the_current_room(self):
+        # the invited member must show up in the open lobby
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+        refreshes = []
+        self.bridge.refresh_room = lambda: refreshes.append(True)
+        self.assertEqual(self.bridge.invite([1]), [])
+        self.assertEqual(refreshes, [True])
+
+    def test_invite_does_not_refresh_for_another_room(self):
+        self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="current"))
+        other = watchtogether.Room(dict(ROOM_JSON, id="other"))
+        refreshes = []
+        self.bridge.refresh_room = lambda: refreshes.append(True)
+        self.assertEqual(self.bridge.invite([1], other), [])
+        self.assertEqual(refreshes, [])
 
     def test_cancel_leaves_without_destroying(self):
         self.bridge.room = watchtogether.Room(ROOM_JSON)
