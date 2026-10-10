@@ -1,6 +1,5 @@
 {% extends "base.xml.tpl" %}
 {% block headers %}
-<defaultcontrol>60</defaultcontrol>
 {% endblock headers %}
 {% block backgroundcolor %}{% endblock %}
 {% block controls %}
@@ -38,21 +37,34 @@
         <colordiffuse>D3111111</colordiffuse>
     </control>
     <control type="label">
-        <posx>0</posx>
+        <posx>20</posx>
         <posy>0</posy>
-        <width>600</width>
+        <width>560</width>
         <height>{{ vscale(80) }}</height>
         <font>font12</font>
-        <align>center</align>
+        <align>left</align>
         <aligny>center</aligny>
         <textcolor>FFFFFFFF</textcolor>
         <label>[B][UPPERCASE]$ADDON[script.plexmod 35053][/UPPERCASE][/B]</label>
     </control>
+    <control type="label">
+        <posx>20</posx>
+        <posy>{{ vscale(80) }}</posy>
+        <width>560</width>
+        <height>{{ vscale(50) }}</height>
+        <font>font10</font>
+        <align>left</align>
+        <aligny>center</aligny>
+        <textcolor>FFBBBBBB</textcolor>
+        <scroll>true</scroll>
+        <scrollspeed>15</scrollspeed>
+        <label>$ADDON[script.plexmod 35066]: $INFO[Window.Property(watching)]</label>
+    </control>
     <control type="list" id="100">
         <posx>0</posx>
-        <posy>{{ vscale(80) }}</posy>
+        <posy>{{ vscale(130) }}</posy>
         <width>600</width>
-        <height>{{ vscale(462) }}</height>
+        <height>{{ vscale(372) }}</height>
         <scrolltime>200</scrolltime>
         <orientation>vertical</orientation>
         <itemlayout height="{{ vscale(100) }}">
@@ -165,8 +177,20 @@
             </control>
         </focusedlayout>
     </control>
+    <control type="label">
+        <visible>String.IsEmpty(Window.Property(is_host))</visible>
+        <posx>0</posx>
+        <posy>{{ vscale(502) }}</posy>
+        <width>600</width>
+        <height>{{ vscale(50) }}</height>
+        <font>font10</font>
+        <align>center</align>
+        <aligny>center</aligny>
+        <textcolor>FFBBBBBB</textcolor>
+        <label>$ADDON[script.plexmod 35074]</label>
+    </control>
     <control type="grouplist" id="50">
-        <defaultcontrol always="true">60</defaultcontrol>
+        <defaultcontrol>61</defaultcontrol>
         <posx>0</posx>
         <posy>{{ vscale(552) }}</posy>
         <width>600</width>
@@ -177,6 +201,7 @@
         <scrolltime>0</scrolltime>
         <usecontrolcoords>true</usecontrolcoords>
         <control type="button" id="60">
+            <visible>!String.IsEmpty(Window.Property(is_host))</visible>
             <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
             <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
             <posx>0</posx>
@@ -189,9 +214,42 @@
             <textoffsetx>70</textoffsetx>
             <textcolor>FF000000</textcolor>
             <focusedcolor>FF000000</focusedcolor>
-            <label>$ADDON[script.plexmod 35069]</label>
+            <label>$ADDON[script.plexmod 35085]</label>
         </control>
         <control type="button" id="61">
+            <visible>!String.IsEmpty(Window.Property(is_host))</visible>
+            <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
+            <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
+            <posx>0</posx>
+            <posy>0</posy>
+            <width min="180">auto</width>
+            <height>{{ vscale(90) }}</height>
+            <font>font10</font>
+            <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
+            <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
+            <textoffsetx>70</textoffsetx>
+            <textcolor>FF000000</textcolor>
+            <focusedcolor>FF000000</focusedcolor>
+            <label>$ADDON[script.plexmod 35072]</label>
+        </control>
+        <control type="button" id="62">
+            <visible>!String.IsEmpty(Window.Property(is_host))</visible>
+            <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
+            <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
+            <posx>0</posx>
+            <posy>0</posy>
+            <width min="180">auto</width>
+            <height>{{ vscale(90) }}</height>
+            <font>font10</font>
+            <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
+            <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
+            <textoffsetx>70</textoffsetx>
+            <textcolor>FF000000</textcolor>
+            <focusedcolor>FF000000</focusedcolor>
+            <label>$ADDON[script.plexmod 35073]</label>
+        </control>
+        <control type="button" id="63">
+            <visible>String.IsEmpty(Window.Property(is_host))</visible>
             <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
             <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
             <posx>0</posx>

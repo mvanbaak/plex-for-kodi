@@ -154,12 +154,55 @@ class RoomsApiTest(unittest.TestCase):
         api, _ = self.api((404, "room not found not found!"))
         api.leave("ca8cfezmke4")
 
-    def test_create_and_invite_are_v2_stubs(self):
-        api, _ = self.api()
-        with self.assertRaises(NotImplementedError):
-            api.create(source_uri="x", title="t")
-        with self.assertRaises(NotImplementedError):
-            api.invite("ca8cfezmke4", [1000002])
+class RoomsWriteTest(unittest.TestCase):
+    """Host capability: POST /rooms and POST /rooms/<id>/invite (v2, task 1)."""
+
+    def api_with(self, status, payload):
+        transport = FakeTransport([(status, payload)])
+        api = watchtogether.RoomsApi(token="tok", transport=transport)
+        return api, transport.calls
+
+    def test_create_posts_source_uri_and_title(self):
+        api, calls = self.api_with(201, {"id": "r1", "title": "T"})
+        room = api.create("server://m/com.plexapp.plugins.library/library/metadata/1", "T")
+        self.assertEqual(room.id, "r1")
+        self.assertEqual(calls[0][0], "POST")
+        self.assertEqual(calls[0][1], "/rooms")
+        self.assertTrue(calls[0][2]["sourceUri"].startswith("server://"))
+
+    def test_invite_posts_user_ids(self):
+        api, calls = self.api_with(200, {"id": "r1", "users": []})
+        api.invite("r1", [1000002, 1000003])
+        self.assertEqual(calls[0][1], "/rooms/r1/invite")
+        self.assertEqual(calls[0][2], {"users": [1000002, 1000003]})
+
+    def test_invite_rejects_non_numeric_ids_without_requesting(self):
+        api, calls = self.api_with(200, {"id": "r1"})
+        with self.assertRaises(ValueError):
+            api.invite("r1", ["NaN"])
+        self.assertEqual(calls, [])          # never reaches the 500-leaking path
+
+    def test_invite_rejects_bool_ids(self):
+        # bool is an int subclass but serializes as true/false -> the same 500
+        api, calls = self.api_with(200, {"id": "r1"})
+        with self.assertRaises(ValueError):
+            api.invite("r1", [True])
+        self.assertEqual(calls, [])
+
+    def test_create_empty_body_is_error(self):
+        api, _ = self.api_with(201, None)
+        with self.assertRaises(watchtogether.WatchTogetherError):
+            api.create("server://x", "T")
+
+    def test_invite_empty_body_is_error(self):
+        api, _ = self.api_with(200, None)
+        with self.assertRaises(watchtogether.WatchTogetherError):
+            api.invite("r1", [1000002])
+
+    def test_create_401_raises_auth_error(self):
+        api, _ = self.api_with(401, None)
+        with self.assertRaises(watchtogether.AuthError):
+            api.create("server://x", "T")
 
 
 class StubTransport(object):
@@ -474,6 +517,20 @@ class SessionSupervisorTest(unittest.TestCase):
             "setBy": "someone-else"}}}))
         self.assertTrue(wait_for(lambda: states))
         self.assertEqual(states[0]["position"], 7.5)
+
+    def test_relay_ready_reaches_on_ready(self):
+        # §6.4: the bridge learns a peer readied up through the supervisor's
+        # on_ready, not by reading the session directly
+        sup = self.make()
+        seen = []
+        sup.on_ready = lambda key, is_ready: seen.append((key, is_ready))
+        sup.start()
+        client = self.open_client()
+        identity = syncplay.build_identity("d", "n", 1)
+        client.on_message(json.dumps({"Set": {"ready": {
+            "username": identity, "isReady": True}}}))
+        self.assertTrue(wait_for(lambda: seen))
+        self.assertEqual(seen[0], (identity, True))
 
     def test_gone_room_fires_on_gone_once_and_never_leaves(self):
         transport = StubTransport(status=404)

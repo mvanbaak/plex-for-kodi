@@ -3436,3 +3436,63 @@ msgstr ""
 msgctxt "#35070"
 msgid "Leave this Watch Together room?"
 msgstr ""
+
+msgctxt "#35071"
+msgid "Invite"
+msgstr ""
+
+msgctxt "#35072"
+msgid "Start"
+msgstr ""
+
+msgctxt "#35073"
+msgid "Cancel"
+msgstr ""
+
+msgctxt "#35074"
+msgid "Waiting for the host…"
+msgstr ""
+
+msgctxt "#35075"
+msgid "Ready"
+msgstr ""
+
+msgctxt "#35076"
+msgid "Invited"
+msgstr ""
+
+msgctxt "#35077"
+msgid "Access unknown"
+msgstr ""
+
+msgctxt "#35078"
+msgid "No one to invite"
+msgstr ""
+
+msgctxt "#35079"
+msgid "Some people could not be invited"
+msgstr ""
+
+msgctxt "#35080"
+msgid "Start Watch Together"
+msgstr ""
+
+msgctxt "#35081"
+msgid "Leave the current room and start a new one?"
+msgstr ""
+
+msgctxt "#35082"
+msgid "Invite…"
+msgstr ""
+
+msgctxt "#35083"
+msgid "Sign in again to use Watch Together"
+msgstr ""
+
+msgctxt "#35084"
+msgid "This item cannot be hosted"
+msgstr ""
+
+msgctxt "#35085"
+msgid "Invite (+)"
+msgstr ""

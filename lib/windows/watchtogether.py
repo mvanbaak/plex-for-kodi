@@ -16,7 +16,7 @@ import time
 from kodi_six import xbmc, xbmcgui
 from plexnet import plexapp, plexlibrary, plexobjects
 
-from lib import plex, player, syncplay, util, watchtogether, ws
+from lib import plex, plexpeople, player, syncplay, util, watchtogether, ws
 from . import busy, kodigui
 
 
@@ -81,6 +81,41 @@ def room_info_rows(room, live_ids):
             "sub": util.T(35068, "Live") if is_live else (user.get("username") or ""),
             "thumb": user.get("thumb") or "",
             "live": is_live,
+        })
+    return rows
+
+
+def lobby_rows(room, roster):
+    """One row per room user for the lobby, with readiness status.
+
+    Status is "Ready" when the user's id is on the roster with isReady True,
+    else "Invited" (they have not joined/readied yet)."""
+    ready = syncplay.ready_member_ids(roster)
+    rows = []
+    for user in (room.participants if room else []):
+        if not isinstance(user, dict):
+            continue
+        rows.append({
+            "title": user.get("title") or user.get("username") or "",
+            "thumb": user.get("thumb") or "",
+            "status": util.T(35075, "Ready") if str(user.get("id")) in ready
+                      else util.T(35076, "Invited"),
+        })
+    return rows
+
+
+def invite_rows(invitees):
+    """list[plexpeople.Invitee] -> list-item dicts for the invite picker.
+
+    `access_unknown` is "1" on a shared server (the sharee list cannot be
+    enumerated, so the row is labelled) and "" otherwise."""
+    rows = []
+    for invitee in invitees or []:
+        rows.append({
+            "id": invitee.id,
+            "title": invitee.title or "",
+            "thumb": invitee.thumb or "",
+            "access_unknown": "1" if invitee.access_unknown else "",
         })
     return rows
 
@@ -210,6 +245,10 @@ class WatchTogetherBridge(object):
         self._tempo = 1.0
         self._tempo_retry_at = 0.0
         self._was_connected = False
+        self._player_ready = False
+        self._started = False
+        self._hosting = False   # host() owns its lobby; guests auto-open one
+        self.lobby = None       # the open LobbyDialog, if any (Task 8)
 
     # -- startup ------------------------------------------------------------
 
@@ -241,6 +280,7 @@ class WatchTogetherBridge(object):
                         self.update_status()
                     self.push_local()
                     self._update_ready(sup)
+                    self._maybe_auto_start()
             except Exception:
                 # never let one bad tick kill the lobby/heartbeat thread
                 util.ERROR()
@@ -368,7 +408,251 @@ class WatchTogetherBridge(object):
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
                      and not xbmc.getCondVisibility("Player.Caching"))
+        self._player_ready = ready
         sup.set_ready(ready)
+
+    def _maybe_auto_start(self):
+        """Start the room once every user in room.users except self is on the
+        roster and ready, and self is ready (§6.4). Only the host drives the
+        room — a ready guest must never call start_playback(). A member who
+        never joins blocks it — the host presses Start instead."""
+        if not self._hosting or self._started or not self._player_ready:
+            return
+        sup = self.supervisor
+        room = self.room
+        if sup is None or sup.session is None or room is None:
+            return
+        self_id = str(getattr(plexapp.ACCOUNT, "ID", None))
+        others = [uid for uid in room.user_ids if str(uid) != self_id]
+        if others and syncplay.members_ready(others, sup.session.roster):
+            self.start_playback()
+
+    def start_playback(self):
+        """Start the room: unpause self (§6.4). The local-change path then
+        broadcasts paused:false, so guests unpause via _apply_remote. Closes
+        the lobby (manual Start and auto-start both land here)."""
+        if self._started:
+            return          # idempotent: auto-start can race on two threads
+        self._started = True
+        pl = _player()
+        if pl is not None:
+            pl.control("play")
+        sup = self.supervisor
+        if sup is not None:
+            sup.send_now()
+        self._close_lobby()
+
+    # -- host flow -----------------------------------------------------------
+
+    def host(self, item):
+        """Start hosting `item`: create the room, join it, show the lobby, and
+        open the item only if the room starts. Main thread.
+
+        The lobby runs over Home, not over the video: a modal dialog must own
+        Kodi's main thread to take input focus, and a dialog opened over the
+        video leaves focus on the video window."""
+        rating_key = getattr(item, "ratingKey", None)
+        if not rating_key:
+            util.DEBUG_LOG("Watch Together: cannot host an item with no ratingKey")
+            return
+        machine_id = getattr(item.server, "uuid", None)
+        if not machine_id:
+            # no machine -> sourceUri would be unresolvable: creating a room
+            # nobody can play is worse than not creating one
+            util.DEBUG_LOG("Watch Together: cannot host an item with no server uuid")
+            util.showNotification(util.T(35084, "This item cannot be hosted"))
+            return
+        source_uri = ("server://{0}/com.plexapp.plugins.library/library/metadata/{1}"
+                      .format(machine_id, rating_key))
+        self._ensure_people_identity()
+        room = self._create_and_join(source_uri, item.title)
+        if room is None:
+            return
+        self._hosting = True
+        self._started = False
+        # the host waits in the lobby rather than buffering the video
+        self._player_ready = True
+        self._open_lobby(host=True)          # blocks until Start/Cancel/ESC
+        if self._started and self.supervisor is not None:
+            self._play_item(item)            # the room started: open the video
+            if self.supervisor is not None:
+                self.disconnect()
+
+    @busy.dialog()
+    def _create_and_join(self, source_uri, title):
+        """Create the room and join it behind a busy spinner (each REST call
+        can block 15 s). Returns the room, or None on failure (already
+        toasted)."""
+        try:
+            room = self.ensure_api().create(source_uri, title)
+        except watchtogether.WatchTogetherError as exc:
+            self._host_failed(exc)
+            return None
+        try:
+            if self.supervisor is not None:
+                # switch rooms: join() early-returns an existing supervisor,
+                # which would orphan the room we just created and leave
+                # self.room stale
+                self.leave()
+            self.join(room.id, hosting=True)
+        except watchtogether.WatchTogetherError as exc:
+            # created but never joined: DELETE the orphan before reporting
+            self._host_failed(exc)
+            try:
+                self.ensure_api().leave(room.id)
+            except watchtogether.WatchTogetherError:
+                pass
+            return None
+        return room
+
+    def _host_failed(self, exc):
+        """Report a host create/join failure. Class name only in the log: the
+        message may carry a service URL (§7). A dead token gets the sign-in
+        hint the spec asks for (§4/Error handling)."""
+        util.DEBUG_LOG("Watch Together: host failed: {0}".format(
+            exc.__class__.__name__))
+        if isinstance(exc, watchtogether.AuthError):
+            util.showNotification(
+                util.T(35083, "Sign in again to use Watch Together"))
+        else:
+            util.showNotification(str(exc))
+
+    def _ensure_people_identity(self):
+        """plexpeople is Kodi-free, so inject our client identifier/version
+        before any plex.tv community call (the invite picker, §Eligibility)."""
+        plexpeople.CLIENT_ID = plex.CLIENT_ID
+        plexpeople.VERSION = util.ADDON.getAddonInfo("version")
+
+    def _open_lobby(self, host=True):
+        """Show the lobby modally, over Home, and block until it closes.
+
+        Main thread only: a modal dialog needs Kodi's main-thread init, and a
+        dialog shown over the video leaves input focus on the video window. The
+        host's video opens after the lobby (see host()); a guest's when the
+        room starts (see room_clicked)."""
+        sup = self.supervisor
+        roster = sup.session.roster \
+            if sup is not None and sup.session is not None else {}
+        lobby = LobbyDialog.create(show=False, room=self.room, roster=roster,
+                                   host=host)
+        # set the mode/title before the window is shown: Kodi evaluates the
+        # controls' <visible> as it loads, so a property set in onFirstInit is
+        # too late for its setFocusId on the host-only Start button
+        lobby.setBoolProperty('is_host', host)
+        lobby.setProperty('watching', self.room.title if self.room else '')
+        self.lobby = lobby
+        lobby.modal()               # blocks (main thread) until the lobby closes
+        if self.lobby is lobby:
+            self.lobby = None
+
+    def _close_lobby(self):
+        lobby, self.lobby = self.lobby, None
+        close = getattr(lobby, "doClose", None)
+        if close is not None:
+            close()
+
+    def _room_unstarted(self):
+        """The joined room has not started: relay State paused with position
+        < 1 s. No State yet counts as started (do not block the join)."""
+        session = getattr(self.supervisor, "session", None)
+        remote = getattr(session, "remote", None)
+        return bool(remote is not None and remote.get("paused") is True
+                    and (remote.get("position") or 0) < 1)
+
+    def _update_guest_lobby(self, remote):
+        """Guest lobby visibility: a guest's lobby is opened by room_clicked
+        (over Home) and closed here the moment playback starts. The host owns
+        its lobby via host(), so this is a no-op while hosting."""
+        if self._hosting:
+            return
+        unstarted = (remote.get("paused") is True
+                     and (remote.get("position") or 0) < 1)
+        if not unstarted and self.lobby is not None:
+            self._close_lobby()
+
+    def _play_item(self, item):
+        from . import videoplayer
+        videoplayer.play(video=item)
+
+    def invite(self, user_ids, room=None):
+        """Invite each id into `room` (default: the current room); return the
+        ids that failed.
+
+        One request per id: the server's relationship gate (§11.9) rejects the
+        whole request when any target is refused, so batching would lose the
+        ones that could have been invited. A dead token is not a per-target
+        failure, so AuthError propagates for the caller to report."""
+        if room is None:
+            room = self.room
+        if room is None:
+            return list(user_ids)
+        failed = []
+        invited = False
+        for user_id in user_ids:
+            try:
+                self.ensure_api().invite(room.id, [user_id])
+                invited = True
+            except watchtogether.AuthError:
+                raise
+            except watchtogether.WatchTogetherError:
+                failed.append(user_id)
+        if invited and room is self.room:
+            self.refresh_room()     # pull the new members into the open lobby
+        return failed
+
+    def invitees(self, room=None):
+        """Eligible invitees for `room` (default: the current room)
+        (plexpeople.eligible_invitees).
+
+        Home users plus friends; on a shared server every row is flagged
+        access_unknown. Degrades to home users only when the friends lookup
+        returns nothing (Review Focus 1) and never raises: the picker must
+        open whatever plex.tv answers."""
+        if room is None:
+            room = self.room
+        account = plexapp.ACCOUNT
+        if room is None or account is None:
+            return []
+        machine_id, _ = parse_source_uri(room.source_uri)
+        owned = self._server_owned(machine_id)
+        self._ensure_people_identity()
+        home = []
+        try:
+            home = self._home_user_dicts(account)
+            return plexpeople.eligible_invitees(
+                account.authToken, machine_id, owned, home,
+                self_id=account.ID, room_user_ids=room.user_ids)
+        except Exception:
+            # any unexpected failure still offers home users (Review Focus 1)
+            util.ERROR()
+            return [plexpeople.Invitee(h["id"], h["title"], h["thumb"], not owned)
+                    for h in home]
+
+    def _home_user_dicts(self, account):
+        """plexapp homeUsers -> the {"id", "title", "thumb"} dicts plexpeople
+        takes (its ids must be ints to dedupe against room/self ids)."""
+        out = []
+        for user in getattr(account, "homeUsers", None) or []:
+            try:
+                user_id = int(user.get("id"))
+            except (TypeError, ValueError):
+                continue
+            out.append({"id": user_id,
+                        "title": user.get("title") or user.get("username") or "",
+                        "thumb": user.get("thumb") or ""})
+        return out
+
+    def _server_owned(self, machine_id):
+        try:
+            servers = getattr(plexapp.SERVERMANAGER, "serversByUuid", None) or {}
+            return bool(getattr(servers.get(machine_id), "owned", False))
+        except Exception:
+            return False
+
+    def cancel_hosting(self):
+        """Cancel hosting: leave the room (DELETE) and close the lobby."""
+        self.leave()
+        self._close_lobby()
 
     def on_local_change(self, kind):
         """Kodi fired onPlayBack* for a local event (the gate let it through)."""
@@ -379,6 +663,7 @@ class WatchTogetherBridge(object):
             sup.request_seek()
         if kind == "play" and sup is not None:
             # the user pressed play: that is a manual readiness (§6.4)
+            self._player_ready = True
             sup.set_ready(True, manually=True)
         # a local change must win: send it now and hold off incoming states
         # briefly, or a peer's older State reverts it (last-setBy-wins, but
@@ -406,6 +691,7 @@ class WatchTogetherBridge(object):
         session = sup.session
         if session is None or not sup.connected:
             return
+        self._update_guest_lobby(remote)
         if time.monotonic() - self._local_change_at < LOCAL_CHANGE_GRACE:
             return          # our own change is in flight; don't be reverted
         pl = _player()
@@ -460,7 +746,8 @@ class WatchTogetherBridge(object):
         else:
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
-            util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
+            util.DEBUG_LOG("Watch Together: applied remote {0} (paused={1}, pos={2})".format(
+                action, want_paused, remote.get("position")))
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
@@ -520,6 +807,11 @@ class WatchTogetherBridge(object):
     def on_roster(self, room):
         self.room = room
         self.update_status()
+        # membership changed (e.g. an invitee joined): repaint the open lobby
+        # so their Invited/Ready status shows without waiting for a ready change
+        refresh = getattr(self.lobby, "refresh", None)
+        if refresh is not None:
+            refresh()
 
     def on_disconnected(self):
         util.DEBUG_LOG("Watch Together: relay connection lost, reconnecting")
@@ -527,6 +819,17 @@ class WatchTogetherBridge(object):
 
     def on_event(self, kind, key):
         util.DEBUG_LOG("Watch Together: roster {0}".format(kind))
+
+    def _on_ready(self, key, is_ready):
+        """A peer's readiness changed (§6.4). Refresh the open lobby and start
+        the room once everyone is ready. Supervisor thread — never raise."""
+        try:
+            refresh = getattr(self.lobby, "refresh", None)
+            if refresh is not None:
+                refresh()
+            self._maybe_auto_start()
+        except Exception:
+            util.ERROR()
 
     def on_gone(self, sup=None):
         """Room ended / removed / dead token — supervisor thread. Teardown,
@@ -542,7 +845,6 @@ class WatchTogetherBridge(object):
                 return
             if sup is not None and current is not sup:
                 return
-            util.DEBUG_LOG("Watch Together: room gone (ended / removed / dead token)")
             self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
@@ -552,7 +854,7 @@ class WatchTogetherBridge(object):
 
     # -- join / leave -----------------------------------------------------------
 
-    def join(self, room_id):
+    def join(self, room_id, hosting=False):
         with self._join_lock:
             if self.supervisor is not None:
                 return self.supervisor
@@ -569,13 +871,18 @@ class WatchTogetherBridge(object):
         sup.on_disconnected = self.on_disconnected
         sup.on_gone = lambda s=sup: self.on_gone(s)
         sup.on_event = self.on_event
+        sup.on_ready = self._on_ready
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor
+            # set before start(): the supervisor connects immediately and a
+            # relay State must not run the guest-lobby path for the host
+            self._hosting = hosting
             sup.start()
             self.room = room
             self.supervisor = sup
             self._was_connected = False
+            self._started = False
             pl = _player()
             if pl is not None:
                 pl.wt_broadcast = self.on_local_change
@@ -632,7 +939,6 @@ class WatchTogetherBridge(object):
         """End the session without DELETE: closing the socket tells peers we
         left (§5.8) but the room keeps us, so the tile can rejoin. Contrast
         leave(), which is the explicit 'leave the room' (DELETE)."""
-        util.DEBUG_LOG("Watch Together: disconnect (session end, keeps membership)")
         with self._join_lock:
             sup, self.supervisor = self.supervisor, None
             self.room = None
@@ -641,7 +947,6 @@ class WatchTogetherBridge(object):
             sup.stop()
 
     def leave(self):
-        util.DEBUG_LOG("Watch Together: leave (DELETE, drops membership)")
         # Detach + reset under the lock, then do the blocking REST call and
         # thread join outside it: holding _join_lock across api.leave() (up to
         # 15s) and sup.stop() (joins the supervisor) would stall a concurrent
@@ -719,6 +1024,10 @@ class WatchTogetherBridge(object):
                 exc.__class__.__name__))
             util.showNotification(str(exc))
             return None
+        # a room that has not started shows the lobby (over Home) first; the
+        # lobby closes on the first playing State, then the video opens
+        if self._room_unstarted():
+            self._open_lobby(host=False)
         return self._watch_room(room)
 
     @busy.dialog()
@@ -732,6 +1041,9 @@ class WatchTogetherBridge(object):
     def _reset_player_link(self, forget_room=False):
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
+        self._started = False
+        self._hosting = False
+        self._close_lobby()     # session ended: no lobby may outlive it
         if forget_room:
             util.setSetting("watchtogether.last_room", "")
         self.update_status()
@@ -776,7 +1088,6 @@ class WatchTogetherBridge(object):
             text = util.T(35054, "{} watching").format(count)
         # base='{0}': the skin reads Window(10000).Property(watchtogether.status)
         util.setGlobalProperty("watchtogether.status", text, base="{0}")
-        util.DEBUG_LOG("Watch Together: status -> {0!r}".format(text))
 
 
 bridge = WatchTogetherBridge()
@@ -823,8 +1134,6 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     def _sync(self):
         room = bridge.room
         participants = room.participants if room else []
-        util.DEBUG_LOG("Watch Together: participants dialog roster: {0} ({1})".format(
-            len(participants), "room set" if room else "room None"))
         key = tuple(sorted(str(u.get('id')) for u in participants))
         if key == self._key:
             return
@@ -888,6 +1197,207 @@ class RoomInfoDialog(kodigui.BaseDialog):
     def onClick(self, controlID):
         if controlID == self.CLOSE_ID:
             self.doClose()
+
+
+class LobbyDialog(kodigui.BaseDialog):
+    """The Watch Together lobby: media title, participant readiness, and the
+    host's Start/Cancel/Invite — or a guest's read-only view with Leave.
+
+    Shown non-modally via create(): host() shows it right before
+    videoplayer.play() blocks, so a modal open would deadlock. It refreshes
+    itself on a peer's readiness change (bridge._on_ready) and drops the
+    bridge's reference when it closes."""
+
+    xmlFile = 'script-plex-watchtogether_lobby.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    INVITE_ID = 60
+    START_ID = 61
+    CANCEL_ID = 62
+    LEAVE_ID = 63
+
+    def __init__(self, *args, **kwargs):
+        kodigui.BaseDialog.__init__(self, *args, **kwargs)
+        self.room = kwargs.get('room')
+        self.roster = kwargs.get('roster') or {}
+        self.is_host = bool(kwargs.get('host'))
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        room = self.room
+        self.setProperty('watching', room.title if room else '')
+        self.setBoolProperty('is_host', self.is_host)
+        self._sync()
+        self.setFocusId(self.START_ID if self.is_host else self.LEAVE_ID)
+
+    def refresh(self):
+        """Re-read the roster and repaint (called from the supervisor thread on
+        a roster/readiness change — never raise). Membership comes from
+        bridge.room in _sync, so an invitee added by the 15 s poll appears."""
+        if getattr(self, 'peopleList', None) is None:
+            return          # window not initialised yet: nothing to repaint
+        sup = bridge.supervisor
+        if sup is not None and sup.session is not None:
+            self.roster = sup.session.roster
+        try:
+            self._sync()
+        except Exception:
+            # never tear down the supervisor thread that called us
+            util.ERROR()
+
+    def _sync(self):
+        # the open lobby must follow the bridge's live room (on_roster replaces
+        # it every 15 s); self.room is only the fallback before the first poll
+        room = bridge.room or self.room
+        items = [kodigui.ManagedListItem(row['title'], row['status'],
+                                         thumbnailImage=row['thumb'],
+                                         data_source=room)
+                 for row in lobby_rows(room, self.roster)]
+        self.peopleList.reset()
+        self.peopleList.addItems(items)
+
+    def onAction(self, action):
+        if action in (xbmcgui.ACTION_PREVIOUS_MENU, xbmcgui.ACTION_NAV_BACK):
+            # ESC/back: close the lobby and leave, instead of falling through
+            # to the video window's stop (which left the modal lobby up on a
+            # grey screen)
+            if self.is_host:
+                bridge.cancel_hosting()
+            else:
+                bridge.leave()
+            return
+        kodigui.BaseDialog.onAction(self, action)
+
+    def onClick(self, controlID):
+        if controlID == self.INVITE_ID:
+            self._invite()
+        elif controlID == self.START_ID:
+            bridge.start_playback()     # closes the lobby
+        elif controlID == self.CANCEL_ID:
+            bridge.cancel_hosting()     # leave (DELETE) + close
+        elif controlID == self.LEAVE_ID:
+            bridge.leave()
+            self.doClose()
+
+    def _invite(self):
+        # Task 9 provides InviteDialog; open it when present so the lobby does
+        # not hard-depend on it landing first. Prefer the bridge's live room:
+        # self.room is the snapshot taken when the lobby opened.
+        invite_dialog = globals().get('InviteDialog')
+        if invite_dialog is not None:
+            invite_dialog.open(room=bridge.room or self.room)
+
+    def doClose(self, **kw):
+        if bridge.lobby is self:
+            bridge.lobby = None
+        kodigui.BaseDialog.doClose(self, **kw)
+
+
+class InviteDialog(kodigui.BaseDialog):
+    """Multi-select picker over the eligible invitees for the current room.
+
+    The list is a plex.tv round trip, so it is fetched off the UI thread; OK
+    calls bridge.invite(selected). A failed target is toasted — the rest are
+    still invited (bridge.invite is per-id)."""
+
+    xmlFile = 'script-plex-watchtogether_invite.xml'
+    path = util.ADDON.getAddonInfo('path')
+    theme = 'Main'
+    res = '1080i'
+    width = 1920
+    height = 1080
+
+    LIST_ID = 100
+    OK_ID = 60
+    CANCEL_ID = 61
+
+    def __init__(self, *args, **kwargs):
+        kodigui.BaseDialog.__init__(self, *args, **kwargs)
+        # the room to invite into; None means "the bridge's current room"
+        self.room = kwargs.get('room')
+
+    def onFirstInit(self):
+        self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        self._invitees = []
+        self._load()
+        # focus OK, not the (still empty) list: focusing an empty list at show
+        # makes Kodi log "Control 100 ... asked to focus, but it can't"
+        self.setFocusId(self.OK_ID)
+
+    def _load(self):
+        thread = threading.Thread(target=self._fetch, name="wt-invitees")
+        thread.daemon = True
+        thread.start()
+
+    def _fetch(self):
+        try:
+            invitees = bridge.invitees(self.room)
+        except Exception:
+            # never let a people lookup break the picker (Review Focus 1)
+            util.ERROR()
+            invitees = []
+        self._invitees = invitees
+        self._sync()
+
+    def _sync(self):
+        if getattr(self, "_closing", False):
+            return          # closed while the fetch was in flight
+        self.setBoolProperty("empty", not self._invitees)
+        self.peopleList.reset()
+        self.peopleList.addItems([
+            kodigui.ManagedListItem(
+                row["title"], "", thumbnailImage=row["thumb"],
+                data_source=row["id"],
+                properties={"access_unknown": row["access_unknown"]})
+            for row in invite_rows(self._invitees)])
+        if self._invitees:
+            # list was empty at show, so focus it now that it has rows
+            self.setFocusId(self.LIST_ID)
+
+    def _selected_ids(self):
+        return [item.dataSource for item in self.peopleList.items
+                if item.getProperty("selected")]
+
+    def onAction(self, action):
+        if action in (xbmcgui.ACTION_PREVIOUS_MENU, xbmcgui.ACTION_NAV_BACK):
+            self.doClose()
+            return
+        kodigui.BaseDialog.onAction(self, action)
+
+    def onClick(self, controlID):
+        if controlID == self.LIST_ID:
+            item = self.peopleList.getSelectedItem()
+            if item is not None:
+                item.setProperty("selected",
+                                 "" if item.getProperty("selected") else "1")
+        elif controlID == self.OK_ID:
+            self._invite()
+        elif controlID == self.CANCEL_ID:
+            self.doClose()
+
+    def _invite(self):
+        ids = self._selected_ids()
+        self.doClose()
+        if ids:
+            self._send(ids)
+
+    @busy.dialog()
+    def _send(self, ids):
+        try:
+            failed = bridge.invite(ids, self.room)
+        except watchtogether.AuthError:
+            # dead token: nothing was invited, ask the user to sign in again
+            util.showNotification(
+                util.T(35083, "Sign in again to use Watch Together"))
+            return
+        if failed:
+            util.showNotification(
+                util.T(35079, "Some people could not be invited"))
 
 
 def show_room_info(room):
