@@ -22,7 +22,7 @@ from .base import KodiTestCase  # noqa: E402
 ROOM_JSON = {
     "id": "ca8cfezmke4",
     "title": "A Fazenda – S18 • E20",
-    "sourceUri": "server://x/metadata/227117",
+    "sourceUri": "server://x/com.plexapp.plugins.library/library/metadata/227117",
     "createdBy": 1000001,
     "startsAt": 1791128438,
     "updatedAt": 1791128438,
@@ -93,9 +93,9 @@ class FakeHandler(object):
 
 
 class FakePlayer(object):
-    def __init__(self, playing=True, video=True, position=50.0, paused=False):
+    def __init__(self, playing=True, video="227117", position=50.0, paused=False):
         self.playing = playing
-        self.video = video
+        self.video = FakeVideo(video) if video else None
         self.position = position
         self.paused = paused
         self.controls = []
@@ -223,6 +223,7 @@ class BridgeTestCase(KodiTestCase):
         util.setSetting("watchtogether.show_osd_status", "true")
         util.setSetting("watchtogether.last_room", "")
         self.bridge = wtwin.WatchTogetherBridge()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
         self.player = FakePlayer()
         wtwin.player.PLAYER = self.player
         ENV.cond_visibility["Player.Paused"] = (
@@ -251,7 +252,7 @@ class SnapshotTest(BridgeTestCase):
         # theme's position, or peers would seek their video to it. We still
         # emit an idle State so the relay does not reap the silent socket.
         self.bridge.supervisor = FakeSupervisor()
-        self.player.video = False
+        self.player.video = None
         self.player.position = 99.0
         self.bridge.push_local()
         self.assertEqual(self.bridge.supervisor.sent,
@@ -284,10 +285,10 @@ class ReadinessTest(BridgeTestCase):
     def test_ready_tracks_playback(self):
         sup = FakeSupervisor()
         self.bridge.supervisor = sup
-        self.player.video = True
+        self.player.video = FakeVideo("227117")
         self.bridge._update_ready(sup)
         self.assertIs(sup.ready, True)
-        self.player.video = False
+        self.player.video = None
         self.bridge._update_ready(sup)
         self.assertIs(sup.ready, False)
 
@@ -853,6 +854,7 @@ class HostFlowTest(BridgeTestCase):
                          "first failure")
 
     def test_invite_without_a_room_fails_every_id(self):
+        self.bridge.room = None
         self.assertEqual(self.bridge.invite([1, 2]), [1, 2])
 
     def test_invite_targets_an_explicit_room(self):
@@ -1066,7 +1068,7 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertEqual(self.player.seek_times, [target])
 
     def test_no_video_playback_is_left_alone(self):
-        self.player.video = False
+        self.player.video = None
         self.bridge.supervisor = FakeSupervisor()
         self.bridge.on_state(self.remote(0, paused=True))
         self.assertEqual(self.player.controls, [])
@@ -1292,12 +1294,12 @@ class PlaybackStartTest(BridgeTestCase):
         return watchtogether.Room(ROOM_JSON)
 
     def test_watch_room_skips_when_a_video_is_already_playing(self):
-        self.player.video = True
+        self.player.video = FakeVideo("227117")
         self.bridge._watch_room(self.room())   # must not start a new playback
         self.assertEqual(self.player.videos, [])
 
     def test_watch_room_without_a_source_server_does_nothing(self):
-        self.player.video = False
+        self.player.video = None
         # SERVERMANAGER is absent in tests: resolve yields nothing, no crash
         self.bridge._watch_room(self.room())
         self.assertEqual(self.player.videos, [])
@@ -1469,6 +1471,51 @@ class SourceUriTest(KodiTestCase):
         self.assertEqual(wtwin.parse_source_uri("server://abc/other"), (None, None))
         self.assertEqual(wtwin.parse_source_uri(""), (None, None))
         self.assertEqual(wtwin.parse_source_uri(None), (None, None))
+
+
+class PlaybackOwnershipTest(BridgeTestCase):
+    """The sync gates: only the room's own item may be synced.
+
+    isPlayingVideo() is true for any video; with auto-join the bridge is
+    connected before room playback, so an unrelated movie must not be
+    paused/seeked by room States nor have its position published."""
+
+    def remote(self, position=100.0, paused=True):
+        return {"position": position, "paused": paused, "doSeek": False,
+                "setBy": "other-identity"}
+
+    def test_unrelated_video_is_not_controlled_by_room_states(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.video = FakeVideo("999")     # not the room's item
+        self.bridge.on_state(self.remote())
+        self.assertEqual(self.player.controls, [], "no pause/play applied")
+        self.assertEqual(self.player.seek_times, [], "no seek applied")
+
+    def test_unrelated_video_position_is_not_published(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = FakeVideo("999")
+        self.player.position = 12.0
+        self.bridge.push_local()
+        self.assertEqual(sup.sent[-1]["position"],
+                         int(sup.session.remote.get("position", 0)),
+                         "echoes the room position, not the unrelated video")
+
+    def test_room_item_is_synced(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.video = FakeVideo("227117")
+        self.bridge.on_state(self.remote(position=50.0))
+        self.assertEqual(self.player.controls, ["pause"])
+
+    def test_ready_requires_the_room_item(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = FakeVideo("999")
+        self.bridge._update_ready(sup)
+        self.assertFalse(self.bridge._player_ready)
+        self.player.video = FakeVideo("227117")
+        self.bridge._update_ready(sup)
+        self.assertTrue(self.bridge._player_ready)
 
 
 class TakeoverConfirmTest(BridgeTestCase):

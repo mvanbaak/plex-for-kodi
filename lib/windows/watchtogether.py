@@ -381,6 +381,17 @@ class WatchTogetherBridge(object):
 
     # -- local -> relay -------------------------------------------------------
 
+    def _owns_playback(self):
+        """True only when the video in the player is the room's own item.
+
+        isPlayingVideo() is true for any video. With auto-join the bridge is
+        connected before room playback, so an unrelated movie must not be
+        paused/seeked by room States, nor have its position published."""
+        room = self.room
+        _, room_key = parse_source_uri(room.source_uri) if room is not None \
+            else (None, None)
+        return bool(room_key and room_key == playing_rating_key())
+
     def push_local(self):
         """Feed the supervisor's snapshot at 1 Hz (§5.5). The supervisor sends;
         this only updates what it will send."""
@@ -392,7 +403,7 @@ class WatchTogetherBridge(object):
         # player. Before playback starts, echo the room's position (never 0,
         # which would make us the driver at the start); the supervisor also
         # holds States until synced.
-        if not pl.isPlayingVideo():
+        if not pl.isPlayingVideo() or not self._owns_playback():
             session = sup.session
             pos = int((session.remote.get("position", 0) if session else 0) or 0)
             sup.outbound_state({"position": pos, "paused": True, "doSeek": False})
@@ -404,9 +415,10 @@ class WatchTogetherBridge(object):
         })
 
     def _update_ready(self, sup):
-        """§6.4: ready when video is loaded and not still buffering."""
+        """§6.4: ready when the room's own video is loaded and not buffering."""
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
+                     and self._owns_playback()
                      and not xbmc.getCondVisibility("Player.Caching"))
         self._player_ready = ready
         sup.set_ready(ready)
@@ -698,7 +710,7 @@ class WatchTogetherBridge(object):
         # §6.3 foreground/background: v1 approximates "foreground" with "video
         # playing" (no ad-break sync — an explicit v1 non-goal). The lobby and
         # theme-music cases stay background and ignore the relay's playstate.
-        if pl is None or not pl.isPlayingVideo():
+        if pl is None or not pl.isPlayingVideo() or not self._owns_playback():
             return
         local_pos = pl.getTime() or 0.0
         # publish our own position only once it actually matches the room: a
