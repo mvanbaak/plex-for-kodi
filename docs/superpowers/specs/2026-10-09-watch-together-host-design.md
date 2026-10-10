@@ -52,6 +52,15 @@ chat, a share URL (none exists — §11.9), pubsub (keep the 15–20 s poll),
 
 ## Flows
 
+> **Live-test revision (2026-10-10):** the lobby runs **over Home**, not over
+> the video. A modal dialog must own Kodi's main thread to take input focus,
+> and a dialog shown over the video leaves focus on the video window (verified
+> on device: the lobby initialised correctly but stayed unfocused, so its
+> buttons were dead and ESC reached the video). The host's lobby therefore
+> shows first and the item opens only once the room starts; a guest's lobby
+> shows on join when the room is unstarted, then the video opens when the host
+> starts. The host is ready as soon as the lobby is up (no pre-buffering).
+
 ### Host
 
 1. Item context menu (`hubMenu`, movie/episode) → **Start Watch Together**.
