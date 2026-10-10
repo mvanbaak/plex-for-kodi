@@ -13,7 +13,7 @@
 </control>
 <control type="group">
     <posx>660</posx>
-    <posy>{{ vscale(266) }}</posy>
+    <posy>{{ vperc(vscale(749)) }}</posy>
     <control type="image">
         <posx>-40</posx>
         <posy>{{ vscale(-40) }}</posy>
@@ -33,7 +33,7 @@
         <posx>0</posx>
         <posy>{{ vscale(80) }}</posy>
         <width>600</width>
-        <height>{{ vscale(562) }}</height>
+        <height>{{ vscale(627) }}</height>
         <texture flipy="true" border="10">script.plex/white-square-top-rounded.png</texture>
         <colordiffuse>D3111111</colordiffuse>
     </control>
@@ -68,6 +68,7 @@
         <height>{{ vscale(412) }}</height>
         <scrolltime>200</scrolltime>
         <orientation>vertical</orientation>
+        <ondown>50</ondown>
         <itemlayout height="{{ vscale(100) }}">
             <control type="image">
                 <posx>20</posx>
@@ -183,19 +184,20 @@
         <posx>0</posx>
         <posy>{{ vscale(552) }}</posy>
         <width>600</width>
-        <height>{{ vscale(90) }}</height>
+        <height>{{ vscale(155) }}</height>
         <align>center</align>
         <itemgap>-50</itemgap>
         <orientation>horizontal</orientation>
         <scrolltime>0</scrolltime>
         <usecontrolcoords>true</usecontrolcoords>
+        <onup>100</onup>
         <control type="button" id="60">
             <animation effect="zoom" start="100" end="110,120" time="100" center="auto" reversible="false">Focus</animation>
             <animation effect="zoom" start="110,120" end="100" time="100" center="auto" reversible="false">UnFocus</animation>
             <posx>0</posx>
             <posy>0</posy>
             <width min="180">auto</width>
-            <height>{{ vscale(90) }}</height>
+            <height>{{ vscale(143) }}</height>
             <font>font10</font>
             <texturefocus colordiffuse="FFE5A00D" border="50">script.plex/buttons/blank-focus.png</texturefocus>
             <texturenofocus colordiffuse="99FFFFFF" border="50">script.plex/buttons/blank.png</texturenofocus>
