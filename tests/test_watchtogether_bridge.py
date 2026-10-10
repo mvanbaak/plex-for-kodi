@@ -378,7 +378,6 @@ class LobbyDialogTest(KodiTestCase):
 
         d = wtwin.LobbyDialog(room=room, roster={}, host=True)
         d.peopleList = FakeList()
-        d._queue_rows()
         d._sync()
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
         self.assertEqual([i.label2 for i in d.peopleList.items],
@@ -411,15 +410,16 @@ class LobbyDialogTest(KodiTestCase):
                 {"id": "r", "users": [{"id": 1, "title": "A"},
                                       {"id": 2, "title": "B"}]})
             d.refresh()
-            d.onNotification('wt-lobby', 'refresh', None)   # the UI-thread drain
         finally:
             wtwin.bridge.room = saved_room
             wtwin.bridge.supervisor = saved_sup
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
 
-    def test_refresh_queues_and_never_touches_the_list_off_thread(self):
-        # the supervisor thread must not mutate the native list: refresh()
-        # only queues rows and asks the UI thread to repaint
+    def test_refresh_repaints_without_any_notification(self):
+        # Kodi delivers onNotification to xbmc.Monitor only, never to a window
+        # (see Window.h's callback list), so routing the repaint through
+        # NotifyAll left the lobby stale and the invite picker empty on a live
+        # client. refresh() must paint the list itself.
         class FakeList(object):
             def __init__(self):
                 self.items = []
@@ -433,20 +433,24 @@ class LobbyDialogTest(KodiTestCase):
         d = wtwin.LobbyDialog(room=FakeRoom(users=[{"id": 1, "title": "A"}]),
                               roster={}, host=True)
         d.peopleList = FakeList()
-        d._queue_rows()
-        d._sync()                       # initial paint
-        before = list(d.peopleList.items)
-        calls = []
-        saved = wtwin.xbmc.executebuiltin
-        wtwin.xbmc.executebuiltin = calls.append
-        try:
-            d.refresh()
-        finally:
-            wtwin.xbmc.executebuiltin = saved
-        self.assertEqual(d.peopleList.items, before, "list untouched off-thread")
-        self.assertTrue(any('NotifyAll' in c for c in calls), "UI repaint queued")
-        d.onNotification('wt-lobby', 'refresh', None)
-        self.assertEqual([i.label for i in d.peopleList.items], ["A"])
+        d.refresh()
+        self.assertEqual([i.label for i in d.peopleList.items], ["A"],
+                         "refresh() must paint the list itself")
+
+    def test_sync_is_a_no_op_once_the_dialog_is_closing(self):
+        # a callback still holding a closed dialog must not touch its controls
+        class ExplodingList(object):
+            def reset(self):
+                raise AssertionError("closed dialog's list was repainted")
+
+            def addItems(self, items):
+                raise AssertionError("closed dialog's list was repainted")
+
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[{"id": 1, "title": "A"}]),
+                              roster={}, host=True)
+        d.peopleList = ExplodingList()
+        d._closing = True
+        d._sync()               # must be a no-op, not a native call
 
 
 class InviteRowsTest(KodiTestCase):
@@ -503,6 +507,21 @@ class InviteDialogTest(KodiTestCase):
         d.peopleList.items[1].setProperty("selected", "1")
         self.assertEqual(d._selected_ids(), [2])
 
+    def test_fetch_paints_the_list_without_any_notification(self):
+        # the picker's only paint path used to be a NotifyAll/onNotification
+        # hand-off, which Kodi never delivers to a window - so the list stayed
+        # empty (0 invitees) on a live client. _fetch must paint it itself.
+        saved = wtwin.bridge.invitees
+        wtwin.bridge.invitees = lambda room=None: [
+            plexpeople.Invitee(1, "a", "", False),
+            plexpeople.Invitee(2, "b", "", True)]
+        try:
+            d = self.dialog()
+            d._fetch()
+        finally:
+            wtwin.bridge.invitees = saved
+        self.assertEqual([i.label for i in d.peopleList.items], ["a", "b"])
+
     def test_fetch_degrades_when_invitees_raises(self):
         # a people lookup failure must not break the picker
         saved = wtwin.bridge.invitees
@@ -514,7 +533,6 @@ class InviteDialogTest(KodiTestCase):
         try:
             d = self.dialog()
             d._fetch()
-            d.onNotification('wt-invite', 'refresh', None)   # the UI-thread drain
         finally:
             wtwin.bridge.invitees = saved
         self.assertEqual(d._invitees, [])

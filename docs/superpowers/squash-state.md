@@ -23,11 +23,14 @@ rewrite**; the pre-rewrite SHAs `27f7dda8`/`198cf1a3`/`8a8ec00f`/`84e9d3a8`/
 - `a49018d1` feat(watchtogether): hub room menu, OSD controls, dialogs
 - `e3feea9d` feat(watchtogether): host capability — create, invite, lobby
 - `304c7fc2` fix(watchtogether): review fixes — ownership, supervisor binding,
-  readiness, UI-thread repaint, localization  ← current tip
+  readiness, UI-thread repaint, localization
+- `94e108ee` fix(watchtogether): paint the lobby/picker without a NotifyAll
+  hand-off  ← current tip
 
-The `304c7fc2` squash was appended on 2026-10-10 as a plain fast-forward (its
-parent is `e3feea9d`, which was the remote tip), so **no force-push was
-needed** for the review fixes.
+Both `304c7fc2` and `94e108ee` were appended on 2026-10-10 as plain
+fast-forwards (each parent was the then-current remote tip), so **no
+force-push was needed** for the review fixes. The `304c7fc2` "UI-thread
+repaint" was wrong and `94e108ee` reverts it — see rule 7.
 
 **Pushed** to `origin` (the fork) and open as **PR #300** against
 `pannal:develop_kodi21` (`mvanbaak:feature/watch-together-squash`). The branch
@@ -52,14 +55,14 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 
 ## Rules for future squashes
 
-1. **Everything up to `16b113ab` on `feature/watch-together-impl` is already
+1. **Everything up to `e27bb0ff` on `feature/watch-together-impl` is already
    squashed** (into the squash branch: `fcb146b6`, `a49018d1`, `e3feea9d`,
-   then `304c7fc2`). Do not re-squash those commits. The granular history lives
-   on the impl branch only and stays there.
+   `304c7fc2`, then `94e108ee`). Do not re-squash those commits. The granular
+   history lives on the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
-   `640f7e8a`** and append the result to `feature/watch-together-squash` as a
+   `e27bb0ff`** and append the result to `feature/watch-together-squash` as a
    single commit. Recipe (run from the repo root):
 
    ```bash
@@ -93,9 +96,10 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
 4. Verification after every squash: the command in the recipe prints
    **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
    Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit, 956 at the
-   `a49018d1` squash, 1050 at the `e3feea9d` squash, **1062 at the `304c7fc2`
-   squash** (1063 on impl — the templated staleness test lives in
-   `tests/test_templates.py`, which the squash branch excludes).
+   `a49018d1` squash, 1050 at the `e3feea9d` squash, 1062 at the `304c7fc2`
+   squash, **1064 at the `94e108ee` squash** (1065 on impl — the templated
+   staleness test lives in `tests/test_templates.py`, which the squash branch
+   excludes).
 
    **Also run a whole-tree redaction grep before pushing — not just `docs/`.**
    The 2026-10-10 leak lived in test fixtures (`tests/test_syncplay.py`,
@@ -108,6 +112,16 @@ Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
    (`pannal:develop_kodi21`), the PR body **must** list the caveats from the
    "Draft PR body" section below. `docs/superpowers/` never ships, so the PR
    description is the only place reviewers (and users) ever see them.
+7. **Kodi delivers `NotifyAll` to `xbmc.Monitor` only — never to a window.**
+   `Window.h`'s callback list has no `onNotification`, and
+   `CGUIWindow::OnMessage` forwards `GUI_MSG_NOTIFY_ALL` to controls only. So a
+   window-level `onNotification` never runs. The `304c7fc2` attempt to marshal
+   the lobby/picker repaint through `NotifyAll` shipped a picker that opened
+   with 0 invitees, and its unit tests passed because they called
+   `onNotification` by hand — i.e. they tested the hand-off, not the client
+   path. `94e108ee` reverts it. To move work onto the UI thread, use something
+   Kodi actually invokes (the addon's monitor, or a synchronous fetch) and make
+   the test exercise that real path.
 
 ## Follow-ups not yet squashed
 
@@ -125,7 +139,13 @@ supervisor binding (every callback bound to its session, so a stale roster
 cannot replace the current room), host-lobby readiness + tempo restore, the
 lobby/invite repaint on the owning UI thread, and the localization move
 (WT ids off #290's `35070`/`35071`, now `35086`/`35087`) plus the German
-entries. Nothing outstanding.
+entries.
+
+Squashed into `94e108ee` (impl marker `e27bb0ff`): the live-test regression
+found in `304c7fc2` — its "UI-thread repaint" used `NotifyAll`, which Kodi
+delivers only to `xbmc.Monitor`, so the invite picker opened with 0 invitees
+and the lobby never refreshed. Reverted to a direct repaint with a `_closing`
+guard (rule 7). Nothing outstanding.
 
 Still separate: the templating staleness fix (`48a78163`) — cherry-picked to
 `fix/template-staleness` (PR #299 against `pannal:develop_kodi21`); NOT part of
@@ -209,9 +229,10 @@ Not included: the templating staleness fix, tracked separately (PR #299).
   current one.
 - **Host-lobby readiness** — readiness no longer reports `False` when every
   member is ready, and the playback tempo is restored when leaving.
-- **Lobby repaint** — the lobby and invite picker now repaint on the owning UI
-  thread (`refresh()` only queues rows), so a callback can no longer touch a
-  closed dialog's controls.
+- **Lobby repaint** — the lobby and invite picker repaint with a `_closing`
+  guard, so a callback can no longer touch a closed dialog's controls. (A
+  `NotifyAll` hand-off was tried first and had to be reverted: Kodi delivers it
+  to `xbmc.Monitor` only, never to a window.)
 - **Localization** — the Watch Together string ids were moved off the range
   claimed by the multi-server-home-rail work (#290) and the missing German
   entries were added.
