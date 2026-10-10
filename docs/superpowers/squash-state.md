@@ -68,6 +68,12 @@ asked.
    **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
    Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit, 956 at the
    `84e9d3a8` squash, **1050 at the `aedf3899` squash**.
+
+   **Also run a whole-tree redaction grep before pushing — not just `docs/`.**
+   The 2026-10-10 leak lived in test fixtures (`tests/test_syncplay.py`,
+   `tests/test_watchtogether_hub.py`); a docs-only grep never caught it. The
+   local redaction map (`REDACTION-LOCAL-not-commit.md`, never committed) has
+   the term list and recipe.
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
    branch — token hygiene rules from the spec apply: no token values anywhere.
 6. When the squash branch is pushed and a PR is opened upstream
