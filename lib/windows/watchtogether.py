@@ -533,8 +533,6 @@ class WatchTogetherBridge(object):
         sup = self.supervisor
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
-        util.DEBUG_LOG("Watch Together: open lobby host={0} hosting={1} room={2}".format(
-            host, self._hosting, bool(self.room)))
         lobby = LobbyDialog.create(show=False, room=self.room, roster=roster,
                                    live_ids=self._live_user_ids(), host=host)
         self.lobby = lobby
@@ -738,7 +736,8 @@ class WatchTogetherBridge(object):
         else:
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
-            util.DEBUG_LOG("Watch Together: applied remote {0}".format(action))
+            util.DEBUG_LOG("Watch Together: applied remote {0} (paused={1}, pos={2})".format(
+                action, want_paused, remote.get("position")))
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
@@ -1226,8 +1225,6 @@ class LobbyDialog(kodigui.BaseDialog):
         self.is_host = bool(kwargs.get('host'))
 
     def onFirstInit(self):
-        util.DEBUG_LOG("Watch Together: lobby onFirstInit is_host={0} room={1}".format(
-            self.is_host, bool(self.room)))
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
         room = self.room
         self.setProperty('watching', room.title if room else '')
