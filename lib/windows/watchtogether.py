@@ -336,10 +336,15 @@ class WatchTogetherBridge(object):
 
         def work():
             try:
-                self.room = self.ensure_api().room(sup.room.id)
+                room = self.ensure_api().room(sup.room.id)
             except Exception as exc:
                 util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
                     exc.__class__.__name__))
+                return
+            # post-request ownership check: a room switch may have happened
+            # while the REST was in flight
+            if self.supervisor is sup:
+                self.room = room
 
         thread = threading.Thread(target=work, name="wt-room")
         thread.daemon = True
@@ -687,6 +692,15 @@ class WatchTogetherBridge(object):
 
     # -- relay -> kodi ---------------------------------------------------------
 
+    def _sup_guard(self, sup, fn, *args):
+        """Run fn(*args) only if sup is still the current supervisor.
+
+        A callback from a stopped supervisor must not touch the bridge after
+        another room has been joined (stop() waits ≤5 s; a room REST can take
+        15 s, so an old supervisor can deliver after a switch)."""
+        if self.supervisor is sup:
+            fn(*args)
+
     def on_state(self, remote):
         """syncplay.Session applied a remote State (supervisor thread).
 
@@ -878,12 +892,15 @@ class WatchTogetherBridge(object):
         sup = watchtogether.SessionSupervisor(room, identity,
                                               plexapp.ACCOUNT.authToken,
                                               _ws_factory, log=util.DEBUG_LOG)
-        sup.on_state = self.on_state
-        sup.on_roster = self.on_roster
-        sup.on_disconnected = self.on_disconnected
+        # bind each callback to its own supervisor: stop() waits ≤5 s but a
+        # room REST can take 15 s, so an old supervisor must not deliver into
+        # the bridge after another room has been joined
+        sup.on_state = lambda remote, s=sup: self._sup_guard(s, self.on_state, remote)
+        sup.on_roster = lambda room, s=sup: self._sup_guard(s, self.on_roster, room)
+        sup.on_disconnected = lambda s=sup: self._sup_guard(s, self.on_disconnected)
         sup.on_gone = lambda s=sup: self.on_gone(s)
-        sup.on_event = self.on_event
-        sup.on_ready = self._on_ready
+        sup.on_event = lambda kind, key, s=sup: self._sup_guard(s, self.on_event, kind, key)
+        sup.on_ready = lambda key, ready, s=sup: self._sup_guard(s, self._on_ready, key, ready)
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor

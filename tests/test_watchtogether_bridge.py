@@ -1473,6 +1473,33 @@ class SourceUriTest(KodiTestCase):
         self.assertEqual(wtwin.parse_source_uri(None), (None, None))
 
 
+class SupervisorGuardTest(BridgeTestCase):
+    """A callback from a stopped supervisor must not touch the bridge.
+
+    stop() waits ≤5 s but a room REST can take 15 s, so an old supervisor can
+    deliver after another room has been joined."""
+
+    def test_stale_roster_callback_is_ignored(self):
+        old, new = FakeSupervisor(), FakeSupervisor()
+        self.bridge.supervisor = new
+        calls = []
+        self.bridge.on_roster = lambda room: calls.append(room)
+        self.bridge._sup_guard(old, self.bridge.on_roster,
+                               watchtogether.Room({"id": "old"}))
+        self.assertEqual(calls, [], "a stale supervisor's roster must not apply")
+        self.bridge._sup_guard(new, self.bridge.on_roster,
+                               watchtogether.Room({"id": "new"}))
+        self.assertEqual(len(calls), 1)
+
+    def test_stale_state_callback_is_ignored(self):
+        old, new = FakeSupervisor(), FakeSupervisor()
+        self.bridge.supervisor = new
+        calls = []
+        self.bridge.on_state = lambda remote: calls.append(remote)
+        self.bridge._sup_guard(old, self.bridge.on_state, {"position": 1.0})
+        self.assertEqual(calls, [])
+
+
 class PlaybackOwnershipTest(BridgeTestCase):
     """The sync gates: only the room's own item may be synced.
 
