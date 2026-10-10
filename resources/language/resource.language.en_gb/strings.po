@@ -3433,14 +3433,6 @@ msgctxt "#35069"
 msgid "Close"
 msgstr ""
 
-msgctxt "#35070"
-msgid "Leave this Watch Together room?"
-msgstr ""
-
-msgctxt "#35071"
-msgid "Invite"
-msgstr ""
-
 msgctxt "#35072"
 msgid "Start"
 msgstr ""
@@ -3495,4 +3487,12 @@ msgstr ""
 
 msgctxt "#35085"
 msgid "Invite (+)"
+msgstr ""
+
+msgctxt "#35086"
+msgid "Leave this Watch Together room?"
+msgstr ""
+
+msgctxt "#35087"
+msgid "Invite"
 msgstr ""

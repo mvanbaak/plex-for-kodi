@@ -208,7 +208,7 @@ def confirm_leave():
     from . import optionsdialog
     button = optionsdialog.show(
         util.T(35056, "Leave room"),
-        util.T(35070, "Leave this Watch Together room?"),
+        util.T(35086, "Leave this Watch Together room?"),
         util.T(32328, "Yes"),
         util.T(32329, "No"))
     return button == 0
@@ -336,10 +336,15 @@ class WatchTogetherBridge(object):
 
         def work():
             try:
-                self.room = self.ensure_api().room(sup.room.id)
+                room = self.ensure_api().room(sup.room.id)
             except Exception as exc:
                 util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
                     exc.__class__.__name__))
+                return
+            # post-request ownership check: a room switch may have happened
+            # while the REST was in flight
+            if self.supervisor is sup:
+                self.room = room
 
         thread = threading.Thread(target=work, name="wt-room")
         thread.daemon = True
@@ -381,6 +386,17 @@ class WatchTogetherBridge(object):
 
     # -- local -> relay -------------------------------------------------------
 
+    def _owns_playback(self):
+        """True only when the video in the player is the room's own item.
+
+        isPlayingVideo() is true for any video. With auto-join the bridge is
+        connected before room playback, so an unrelated movie must not be
+        paused/seeked by room States, nor have its position published."""
+        room = self.room
+        _, room_key = parse_source_uri(room.source_uri) if room is not None \
+            else (None, None)
+        return bool(room_key and room_key == playing_rating_key())
+
     def push_local(self):
         """Feed the supervisor's snapshot at 1 Hz (§5.5). The supervisor sends;
         this only updates what it will send."""
@@ -392,7 +408,7 @@ class WatchTogetherBridge(object):
         # player. Before playback starts, echo the room's position (never 0,
         # which would make us the driver at the start); the supervisor also
         # holds States until synced.
-        if not pl.isPlayingVideo():
+        if not pl.isPlayingVideo() or not self._owns_playback():
             session = sup.session
             pos = int((session.remote.get("position", 0) if session else 0) or 0)
             sup.outbound_state({"position": pos, "paused": True, "doSeek": False})
@@ -404,9 +420,18 @@ class WatchTogetherBridge(object):
         })
 
     def _update_ready(self, sup):
-        """§6.4: ready when video is loaded and not still buffering."""
+        """§6.4: ready when the room's own video is loaded and not buffering.
+
+        The host waiting in the Home lobby has no video yet, so that state
+        counts as ready too — host() sets it, but the 1 s tick would otherwise
+        overwrite it with False and auto-start would never fire."""
+        if self._hosting and not self._started:
+            self._player_ready = True
+            sup.set_ready(True)
+            return
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
+                     and self._owns_playback()
                      and not xbmc.getCondVisibility("Player.Caching"))
         self._player_ready = ready
         sup.set_ready(ready)
@@ -675,6 +700,15 @@ class WatchTogetherBridge(object):
 
     # -- relay -> kodi ---------------------------------------------------------
 
+    def _sup_guard(self, sup, fn, *args):
+        """Run fn(*args) only if sup is still the current supervisor.
+
+        A callback from a stopped supervisor must not touch the bridge after
+        another room has been joined (stop() waits ≤5 s; a room REST can take
+        15 s, so an old supervisor can deliver after a switch)."""
+        if self.supervisor is sup:
+            fn(*args)
+
     def on_state(self, remote):
         """syncplay.Session applied a remote State (supervisor thread).
 
@@ -698,7 +732,7 @@ class WatchTogetherBridge(object):
         # §6.3 foreground/background: v1 approximates "foreground" with "video
         # playing" (no ad-break sync — an explicit v1 non-goal). The lobby and
         # theme-music cases stay background and ignore the relay's playstate.
-        if pl is None or not pl.isPlayingVideo():
+        if pl is None or not pl.isPlayingVideo() or not self._owns_playback():
             return
         local_pos = pl.getTime() or 0.0
         # publish our own position only once it actually matches the room: a
@@ -866,12 +900,15 @@ class WatchTogetherBridge(object):
         sup = watchtogether.SessionSupervisor(room, identity,
                                               plexapp.ACCOUNT.authToken,
                                               _ws_factory, log=util.DEBUG_LOG)
-        sup.on_state = self.on_state
-        sup.on_roster = self.on_roster
-        sup.on_disconnected = self.on_disconnected
+        # bind each callback to its own supervisor: stop() waits ≤5 s but a
+        # room REST can take 15 s, so an old supervisor must not deliver into
+        # the bridge after another room has been joined
+        sup.on_state = lambda remote, s=sup: self._sup_guard(s, self.on_state, remote)
+        sup.on_roster = lambda room, s=sup: self._sup_guard(s, self.on_roster, room)
+        sup.on_disconnected = lambda s=sup: self._sup_guard(s, self.on_disconnected)
         sup.on_gone = lambda s=sup: self.on_gone(s)
-        sup.on_event = self.on_event
-        sup.on_ready = self._on_ready
+        sup.on_event = lambda kind, key, s=sup: self._sup_guard(s, self.on_event, kind, key)
+        sup.on_ready = lambda key, ready, s=sup: self._sup_guard(s, self._on_ready, key, ready)
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor
@@ -1039,6 +1076,12 @@ class WatchTogetherBridge(object):
         self.join(room_id)
 
     def _reset_player_link(self, forget_room=False):
+        # restore normal speed before detaching: a remote catch-up may have
+        # left the player at 0.95, and leaving via the OSD keeps the video
+        # running, so it would stay slowed after sync has ended
+        if self._tempo != 1.0:
+            self._set_tempo(1.0)
+        self._tempo = 1.0
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
         self._started = False
@@ -1229,35 +1272,48 @@ class LobbyDialog(kodigui.BaseDialog):
 
     def onFirstInit(self):
         self.peopleList = kodigui.ManagedControlList(self, self.LIST_ID, 8)
+        self._pending = None
         room = self.room
         self.setProperty('watching', room.title if room else '')
         self.setBoolProperty('is_host', self.is_host)
+        self._queue_rows()               # first paint
         self._sync()
         self.setFocusId(self.START_ID if self.is_host else self.LEAVE_ID)
 
     def refresh(self):
-        """Re-read the roster and repaint (called from the supervisor thread on
-        a roster/readiness change — never raise). Membership comes from
-        bridge.room in _sync, so an invitee added by the 15 s poll appears."""
+        """Recompute the participant rows off the supervisor thread and ask the
+        owning UI thread to repaint. Never touches the native list here: a
+        dialog can be closed while a callback still holds it, and a Python
+        try/except cannot make a stale native control valid."""
         if getattr(self, 'peopleList', None) is None:
             return          # window not initialised yet: nothing to repaint
         sup = bridge.supervisor
         if sup is not None and sup.session is not None:
             self.roster = sup.session.roster
-        try:
-            self._sync()
-        except Exception:
-            # never tear down the supervisor thread that called us
-            util.ERROR()
+        self._queue_rows()
+        # NotifyAll runs this window's onNotification on the main thread
+        xbmc.executebuiltin('NotifyAll(wt-lobby, refresh)')
 
-    def _sync(self):
+    def onNotification(self, sender, method, data):
+        if sender == 'wt-lobby' and method == 'refresh':
+            self._sync()
+
+    def _queue_rows(self):
         # the open lobby must follow the bridge's live room (on_roster replaces
         # it every 15 s); self.room is only the fallback before the first poll
+        room = bridge.room or self.room
+        self._pending = lobby_rows(room, self.roster)
+
+    def _sync(self):
+        """Repaint the participant list. Main thread only."""
+        if self._closing or self._pending is None:
+            return
+        rows, self._pending = self._pending, None
         room = bridge.room or self.room
         items = [kodigui.ManagedListItem(row['title'], row['status'],
                                          thumbnailImage=row['thumb'],
                                          data_source=room)
-                 for row in lobby_rows(room, self.roster)]
+                 for row in rows]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
@@ -1342,7 +1398,13 @@ class InviteDialog(kodigui.BaseDialog):
             util.ERROR()
             invitees = []
         self._invitees = invitees
-        self._sync()
+        # NotifyAll runs onNotification on the main thread: the native list is
+        # only ever touched there (the worker may outlive the dialog)
+        xbmc.executebuiltin('NotifyAll(wt-invite, refresh)')
+
+    def onNotification(self, sender, method, data):
+        if sender == 'wt-invite' and method == 'refresh':
+            self._sync()
 
     def _sync(self):
         if getattr(self, "_closing", False):
