@@ -674,10 +674,13 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.api = self.api
         self.joined = []
         self.opened = []
+        self.lobby_opens = []
+        self.start_on_lobby = False       # a test sets True to simulate Start
         # host() joins via the real (network/socket) join and opens the real
         # video window; both are stubbed here to keep the test offline.
         self.bridge.join = self._fake_join
         self.bridge._play_item = self.opened.append
+        self.bridge._open_lobby = self._fake_lobby
         # @busy.dialog() around the create/join portion cannot build a real
         # window under the xbmcgui stub
         self._saved_busy_window = wtwin.busy.BusyWindow
@@ -687,12 +690,20 @@ class HostFlowTest(BridgeTestCase):
         wtwin.busy.BusyWindow = self._saved_busy_window
         super(HostFlowTest, self).tearDown()
 
+    def _fake_lobby(self, host=True):
+        # _open_lobby is modal (blocks until Start/Cancel/ESC); stubbed so the
+        # test does not need a real window
+        self.lobby_opens.append(host)
+        if self.start_on_lobby:
+            self.bridge._started = True
+
     def _fake_join(self, room_id, hosting=False):
         if self.bridge.supervisor is not None:
             return self.bridge.supervisor   # mirrors join()'s early return
         self.joined.append(room_id)
         self.bridge._hosting = hosting
         self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
 
     def test_host_creates_room_with_item_source_uri(self):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
@@ -703,54 +714,18 @@ class HostFlowTest(BridgeTestCase):
             "server://m/com.plexapp.plugins.library/library/metadata/1")
         self.assertEqual(created["title"], "T")
 
-    def test_host_opens_item_paused(self):
+    def test_host_shows_the_lobby_before_the_video(self):
+        # the lobby runs over Home; the video opens only once the room starts
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
-        self.assertTrue(self.player.pauseAfterPlaybackStarted,
-                        "the start-paused hook must be armed before play()")
-        self.assertEqual(len(self.opened), 1, "the item must be opened")
+        self.assertEqual(self.lobby_opens, [True])
+        self.assertEqual(self.opened, [], "no video until the room starts")
+        self.assertTrue(self.bridge._player_ready,
+                        "the host is ready while waiting in the lobby")
 
-    def test_host_defers_the_lobby_to_the_video_window(self):
-        # a modal lobby opened before the video blocks its activation, so it is
-        # opened from the video window's playback-started hook instead
-        opened = []
-        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+    def test_host_opens_the_video_when_the_room_starts(self):
+        self.start_on_lobby = True
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
-        self.assertEqual(opened, [])
-        self.assertTrue(self.bridge._lobby_pending)
-
-    def test_open_pending_lobby_opens_the_host_lobby(self):
-        self.bridge._hosting = True
-        self.bridge._lobby_pending = True
-        opened = []
-        self.bridge._open_lobby = lambda *a, **k: opened.append(k.get("host"))
-        self.bridge.open_pending_lobby()
-        self.assertEqual(opened, [True])
-        self.assertFalse(self.bridge._lobby_pending)
-
-    def test_open_pending_lobby_is_a_noop_for_a_guest_without_a_session(self):
-        self.bridge._hosting = False
-        self.bridge.supervisor = None
-        opened = []
-        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
-        self.bridge.open_pending_lobby()
-        self.assertEqual(opened, [])
-
-    def test_host_closes_the_lobby_when_playback_ends(self):
-        # backing out without Start/Cancel must not orphan the non-modal lobby
-        self.bridge.supervisor = FakeSupervisor()
-        lobby = FakeLobby()
-        self.bridge.lobby = lobby
-
-        self.bridge._open_paused(FakeItem())
-
-        self.assertTrue(lobby.closed, "the lobby must close when playback ends")
-        self.assertIsNone(self.bridge.lobby)
-
-    def test_open_paused_without_a_lobby_is_a_noop(self):
-        # Start/Cancel may already have cleared it; the close must not raise
-        self.bridge.supervisor = FakeSupervisor()
-        self.bridge._open_paused(FakeItem())
-        self.assertIsNone(self.bridge.lobby)
+        self.assertEqual(len(self.opened), 1, "Start opens the video")
 
     def test_host_joins_the_created_room(self):
         self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
@@ -771,7 +746,6 @@ class HostFlowTest(BridgeTestCase):
         self.assertEqual(self.joined, ["ca8cfezmke4"],
                          "must actually join the new room, not no-op")
         self.assertEqual(self.bridge.room.id, "ca8cfezmke4")
-        self.assertIsNone(self.bridge.supervisor)
 
     def test_host_skips_without_a_rating_key(self):
         self.bridge.host(FakeItem(machine="m", rating_key=None, title="T"))
@@ -880,8 +854,9 @@ class HostFlowTest(BridgeTestCase):
         self.assertTrue(self.bridge._hosting)
 
     def test_open_lobby_shows_modally(self):
-        # a non-modal show() leaves focus on the video (buttons unclickable,
-        # ESC goes to the video), so the lobby must be shown modally
+        # the dialog must be shown modally (main thread); setUp's stub bypasses
+        # _open_lobby, so restore the real method here
+        self.bridge.__dict__.pop("_open_lobby", None)
         made = []
 
         class FakeDialog(object):
@@ -935,36 +910,36 @@ class GuestLobbyTest(BridgeTestCase):
     def set_remote(self, position, paused):
         self.bridge.supervisor.session.remote = self.state(position, paused)
 
-    def test_guest_shows_lobby_for_unstarted_room(self):
-        # the guest lobby is opened by the video window's playback-started hook
+    def test_room_unstarted_for_paused_at_zero(self):
         self.set_remote(0.0, True)
-        self.bridge.open_pending_lobby()
-        self.assertIsNotNone(self.bridge.lobby, "an unstarted room shows the lobby")
-        self.assertIs(self.bridge.lobby.is_host, False,
-                      "a guest's lobby is read-only")
+        self.assertTrue(self.bridge._room_unstarted())
 
-    def test_guest_no_lobby_for_playing_room(self):
+    def test_room_started_when_playing(self):
         self.set_remote(120.0, False)
-        self.bridge.open_pending_lobby()
-        self.assertIsNone(self.bridge.lobby)
+        self.assertFalse(self.bridge._room_unstarted())
+
+    def test_room_started_when_no_state_yet(self):
+        # no relay State yet: do not block the join waiting for a lobby
+        self.bridge.supervisor = None
+        self.assertFalse(self.bridge._room_unstarted())
 
     def test_guest_closes_lobby_when_playback_starts(self):
         self.set_remote(0.0, True)
-        self.bridge.open_pending_lobby()
+        self.bridge._open_lobby(host=False)
         self.assertIsNotNone(self.bridge.lobby)
         self.bridge.on_state(self.state(1.5, False))
         self.assertIsNone(self.bridge.lobby, "playback started: close the lobby")
 
-    def test_guest_lobby_is_not_shown_to_the_host(self):
-        # the host owns its own lobby via host(); the guest path must not fire
+    def test_guest_lobby_is_not_closed_for_the_host(self):
+        # _update_guest_lobby is a no-op while hosting
         self.bridge._hosting = True
-        self.set_remote(0.0, True)
-        self.bridge.open_pending_lobby()
-        self.assertIsNone(self.bridge.lobby)
+        self.bridge.lobby = FakeLobby()
+        self.bridge.on_state(self.state(1.5, False))
+        self.assertIsNotNone(self.bridge.lobby)
 
     def test_guest_lobby_closes_when_the_room_goes_away(self):
         self.set_remote(0.0, True)
-        self.bridge.open_pending_lobby()
+        self.bridge._open_lobby(host=False)
         self.assertIsNotNone(self.bridge.lobby)
         self.bridge.on_gone()
         self.assertIsNone(self.bridge.lobby, "room ended: no orphan lobby")

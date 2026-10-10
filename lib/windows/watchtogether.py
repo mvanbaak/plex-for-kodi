@@ -250,7 +250,6 @@ class WatchTogetherBridge(object):
         self._player_ready = False
         self._started = False
         self._hosting = False   # host() owns its lobby; guests auto-open one
-        self._lobby_pending = False   # host lobby to show once the video is up
         self.lobby = None       # the open LobbyDialog, if any (Task 8)
 
     # -- startup ------------------------------------------------------------
@@ -446,9 +445,12 @@ class WatchTogetherBridge(object):
     # -- host flow -----------------------------------------------------------
 
     def host(self, item):
-        """Start hosting `item`: create the room, join it, open the item paused
-        and show the lobby. Main thread; the opened item's window blocks here
-        until playback ends (like _watch_room)."""
+        """Start hosting `item`: create the room, join it, show the lobby, and
+        open the item only if the room starts. Main thread.
+
+        The lobby runs over Home, not over the video: a modal dialog must own
+        Kodi's main thread to take input focus, and a dialog opened over the
+        video leaves focus on the video window."""
         rating_key = getattr(item, "ratingKey", None)
         if not rating_key:
             util.DEBUG_LOG("Watch Together: cannot host an item with no ratingKey")
@@ -467,10 +469,14 @@ class WatchTogetherBridge(object):
         if room is None:
             return
         self._hosting = True
-        # the lobby is opened by the video window's playback-started hook
-        # (open_pending_lobby) so it runs on the main thread and takes focus
-        self._lobby_pending = True
-        self._open_paused(item)
+        self._started = False
+        # the host waits in the lobby rather than buffering the video
+        self._player_ready = True
+        self._open_lobby(host=True)          # blocks until Start/Cancel/ESC
+        if self._started and self.supervisor is not None:
+            self._play_item(item)            # the room started: open the video
+            if self.supervisor is not None:
+                self.disconnect()
 
     @busy.dialog()
     def _create_and_join(self, source_uri, title):
@@ -518,13 +524,12 @@ class WatchTogetherBridge(object):
         plexpeople.VERSION = util.ADDON.getAddonInfo("version")
 
     def _open_lobby(self, host=True):
-        """Show the lobby modally over the video.
+        """Show the lobby modally, over Home, and block until it closes.
 
-        Must run on the video window's thread: a modal dialog needs Kodi's
-        main-thread init (a modal() from another thread never fires onInit),
-        and a non-modal show() never takes input focus. The host path calls
-        this from the video window's playback-started hook (open_pending_lobby);
-        the guest path from the relay state handler."""
+        Main thread only: a modal dialog needs Kodi's main-thread init, and a
+        dialog shown over the video leaves input focus on the video window. The
+        host's video opens after the lobby (see host()); a guest's when the
+        room starts (see room_clicked)."""
         sup = self.supervisor
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
@@ -537,36 +542,23 @@ class WatchTogetherBridge(object):
         if self.lobby is lobby:
             self.lobby = None
 
-    def open_pending_lobby(self):
-        """Called from the video window's playback-started hook (main thread):
-        show the lobby modally once the video is up, so it takes input focus.
-
-        The host's lobby is pending from host(); a guest's shows when the
-        joined room has not started (relay State paused with position < 1 s)."""
-        if self.lobby is not None:
-            return
-        if self._hosting:
-            if self._lobby_pending:
-                self._lobby_pending = False
-                self._open_lobby(host=True)
-            return
-        sup = self.supervisor
-        remote = (sup.session.remote
-                  if sup is not None and sup.session is not None else None)
-        if (remote is not None and remote.get("paused") is True
-                and (remote.get("position") or 0) < 1):
-            self._open_lobby(host=False)
-
     def _close_lobby(self):
         lobby, self.lobby = self.lobby, None
         close = getattr(lobby, "doClose", None)
         if close is not None:
             close()
 
+    def _room_unstarted(self):
+        """The joined room has not started: relay State paused with position
+        < 1 s. No State yet counts as started (do not block the join)."""
+        session = getattr(self.supervisor, "session", None)
+        remote = getattr(session, "remote", None)
+        return bool(remote is not None and remote.get("paused") is True
+                    and (remote.get("position") or 0) < 1)
+
     def _update_guest_lobby(self, remote):
-        """Guest lobby visibility (§Guest lobby visibility): a guest's lobby is
-        opened by the video window's playback-started hook (open_pending_lobby,
-        main thread) and closed here the moment playback starts. The host owns
+        """Guest lobby visibility: a guest's lobby is opened by room_clicked
+        (over Home) and closed here the moment playback starts. The host owns
         its lobby via host(), so this is a no-op while hosting."""
         if self._hosting:
             return
@@ -574,32 +566,6 @@ class WatchTogetherBridge(object):
                      and (remote.get("position") or 0) < 1)
         if not unstarted and self.lobby is not None:
             self._close_lobby()
-
-    def _open_paused(self, item):
-        """Open the host's item so it lands paused once AV starts.
-
-        videoplayer.play() blocks, so the pause cannot be applied after it
-        returns. Arm the player's existing start-paused hook instead
-        (pauseAfterPlaybackStarted, applied on AVStarted).
-
-        The lobby is a modal WindowXMLDialog, so it must not be shown before
-        the video window activates: Kodi refuses the activation while a modal
-        dialog is up ("Activate of window ... refused because there are active
-        modal dialogs"). Show it once playback has started, from a helper
-        thread, while play() blocks the main thread."""
-        pl = _player()
-        if pl is not None:
-            pl.pauseAfterPlaybackStarted = True
-        try:
-            self._play_item(item)
-        except Exception:
-            util.ERROR()
-        finally:
-            # the lobby must not outlive the host's playback: if Start/Cancel
-            # already cleared it this is a no-op
-            self._close_lobby()
-            if self.supervisor is not None:
-                self.disconnect()
 
     def _play_item(self, item):
         from . import videoplayer
@@ -1052,6 +1018,10 @@ class WatchTogetherBridge(object):
                 exc.__class__.__name__))
             util.showNotification(str(exc))
             return None
+        # a room that has not started shows the lobby (over Home) first; the
+        # lobby closes on the first playing State, then the video opens
+        if self._room_unstarted():
+            self._open_lobby(host=False)
         return self._watch_room(room)
 
     @busy.dialog()
@@ -1067,7 +1037,6 @@ class WatchTogetherBridge(object):
         player.PLAYER.wt_applying_remote = 0.0
         self._started = False
         self._hosting = False
-        self._lobby_pending = False
         self._close_lobby()     # session ended: no lobby may outlive it
         if forget_room:
             util.setSetting("watchtogether.last_room", "")
@@ -1442,12 +1411,6 @@ def show_participants():
     window = ParticipantsDialog.open()
     del window
     util.garbageCollect()
-
-
-def open_pending_lobby():
-    """Video-window hook (playback-started, main thread): show a pending host
-    lobby modally so it takes input focus."""
-    bridge.open_pending_lobby()
 
 
 @busy.dialog()

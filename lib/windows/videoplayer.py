@@ -271,14 +271,6 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
             util.DEBUG_LOG('VideoPlayerWindow: Abort flag set, closing')
             self.doClose()
 
-        # Watch Together: a host's lobby opens here (not before play) so the
-        # modal dialog runs on this window's thread and takes input focus
-        try:
-            from . import watchtogether as wtwin
-            wtwin.open_pending_lobby()
-        except Exception:
-            util.ERROR()
-
     def setPlaybackFailed(self, *args, **kwargs):
         self.playbackFailed = True
 
