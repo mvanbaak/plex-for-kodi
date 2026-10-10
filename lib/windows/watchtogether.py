@@ -535,6 +535,11 @@ class WatchTogetherBridge(object):
             if sup is not None and sup.session is not None else {}
         lobby = LobbyDialog.create(show=False, room=self.room, roster=roster,
                                    host=host)
+        # set the mode/title before the window is shown: Kodi evaluates the
+        # controls' <visible> as it loads, so a property set in onFirstInit is
+        # too late for its setFocusId on the host-only Start button
+        lobby.setBoolProperty('is_host', host)
+        lobby.setProperty('watching', self.room.title if self.room else '')
         self.lobby = lobby
         lobby.modal()               # blocks (main thread) until the lobby closes
         if self.lobby is lobby:
@@ -840,7 +845,6 @@ class WatchTogetherBridge(object):
                 return
             if sup is not None and current is not sup:
                 return
-            util.DEBUG_LOG("Watch Together: room gone (ended / removed / dead token)")
             self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
@@ -935,7 +939,6 @@ class WatchTogetherBridge(object):
         """End the session without DELETE: closing the socket tells peers we
         left (§5.8) but the room keeps us, so the tile can rejoin. Contrast
         leave(), which is the explicit 'leave the room' (DELETE)."""
-        util.DEBUG_LOG("Watch Together: disconnect (session end, keeps membership)")
         with self._join_lock:
             sup, self.supervisor = self.supervisor, None
             self.room = None
@@ -944,7 +947,6 @@ class WatchTogetherBridge(object):
             sup.stop()
 
     def leave(self):
-        util.DEBUG_LOG("Watch Together: leave (DELETE, drops membership)")
         # Detach + reset under the lock, then do the blocking REST call and
         # thread join outside it: holding _join_lock across api.leave() (up to
         # 15s) and sup.stop() (joins the supervisor) would stall a concurrent
@@ -1086,7 +1088,6 @@ class WatchTogetherBridge(object):
             text = util.T(35054, "{} watching").format(count)
         # base='{0}': the skin reads Window(10000).Property(watchtogether.status)
         util.setGlobalProperty("watchtogether.status", text, base="{0}")
-        util.DEBUG_LOG("Watch Together: status -> {0!r}".format(text))
 
 
 bridge = WatchTogetherBridge()
@@ -1133,8 +1134,6 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     def _sync(self):
         room = bridge.room
         participants = room.participants if room else []
-        util.DEBUG_LOG("Watch Together: participants dialog roster: {0} ({1})".format(
-            len(participants), "room set" if room else "room None"))
         key = tuple(sorted(str(u.get('id')) for u in participants))
         if key == self._key:
             return

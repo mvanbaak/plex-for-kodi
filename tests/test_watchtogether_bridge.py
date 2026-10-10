@@ -928,6 +928,13 @@ class HostFlowTest(BridgeTestCase):
         class FakeDialog(object):
             def __init__(self):
                 self.modalled = False
+                self.props = {}
+
+            def setBoolProperty(self, key, value):
+                self.props[key] = value
+
+            def setProperty(self, key, value):
+                self.props[key] = value
 
             def modal(self):
                 self.modalled = True
