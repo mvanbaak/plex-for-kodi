@@ -57,7 +57,7 @@
         <align>left</align>
         <aligny>center</aligny>
         <textcolor>FFBBBBBB</textcolor>
-        <label>$ADDON[script.plexmod 35071]</label>
+        <label>$ADDON[script.plexmod 35087]</label>
     </control>
     <control type="list" id="100">
         <posx>0</posx>
