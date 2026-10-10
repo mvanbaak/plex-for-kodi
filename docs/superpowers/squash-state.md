@@ -18,21 +18,22 @@ Base `2707bbe7` (`1.14.1`), then:
 - `27f7dda8` chore: uv dev tooling and Watch Together protocol research
 - `198cf1a3` feat(watchtogether): Phase 1 protocol library
 - `8a8ec00f` feat(watchtogether): Phase 2 Kodi UI integration
-- `84e9d3a8` feat(watchtogether): hub room menu, OSD controls, dialogs  ← current tip
+- `84e9d3a8` feat(watchtogether): hub room menu, OSD controls, dialogs
+- `aedf3899` feat(watchtogether): host capability — create, invite, lobby  ← current tip
 
 **Not pushed.** The squash branch is local only; push it only when explicitly
 asked.
 
 ## Rules for future squashes
 
-1. **Everything up to `686e9b57` on `feature/watch-together-impl` is already
-   squashed** (into the squash branch: `8a8ec00f`, then `84e9d3a8`). Do not
-   re-squash those commits. The granular history lives on the impl branch only
-   and stays there.
+1. **Everything up to `5f33755b` on `feature/watch-together-impl` is already
+   squashed** (into the squash branch: `8a8ec00f`, `84e9d3a8`, then
+   `aedf3899`). Do not re-squash those commits. The granular history lives on
+   the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
-   `686e9b57`** and append the result to `feature/watch-together-squash` as a
+   `5f33755b`** and append the result to `feature/watch-together-squash` as a
    single commit. Recipe (run from the repo root):
 
    ```bash
@@ -51,8 +52,8 @@ asked.
 
    # verify (see rule 4)
    git diff --name-only feature/watch-together-squash feature/watch-together-impl \
-       | grep -vE '^(docs/superpowers/|lib/templating/render.py|tests/test_templates.py)$' \
-       || echo "only superpowers + the excluded templating fix differ"
+       | grep -vE '^docs/superpowers/|^lib/templating/render.py$|^tests/test_templates.py$' \
+       || echo "(nothing else differs)"
    uv run pytest -q
    git checkout feature/watch-together-impl
    ```
@@ -64,10 +65,9 @@ asked.
 
    Then update rule 1's marker (to `$MARKER`) and the "current tip" above.
 4. Verification after every squash: the command in the recipe prints
-   **only `.gitignore`** (plus the two excluded templating files, while
-   `48a78163` stays out of the squash), and `uv run pytest -q` is green on the
-   squash branch. Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit,
-   **956 at the `84e9d3a8` squash**.
+   **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
+   Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit, 956 at the
+   `84e9d3a8` squash, **1050 at the `aedf3899` squash**.
 5. Never commit `docs/superpowers/` or anything token-shaped to the squash
    branch — token hygiene rules from the spec apply: no token values anywhere.
 6. When the squash branch is pushed and a PR is opened upstream
@@ -77,20 +77,26 @@ asked.
 
 ## Follow-ups not yet squashed
 
-Squashed into `84e9d3a8` (impl marker `686e9b57`): room tile context menu
-(`3e237459`), Leave + Participants OSD buttons (`505ef628`), THEME_VERSION bump
-(`bcb7802e`), one OSD icon button (`259d87fa`), teardown diagnostics
-(`f2d9322a`), participants dialog OK/Leave + avatars (`aaafeb80`), OSD icon size
-(`6b9b4395`). Nothing outstanding.
+Squashed into `aedf3899` (impl marker `5f33755b`): the v2 host capability —
+`RoomsApi.create`/`invite`, the `plexpeople` eligibility helper (community
+GraphQL friends + server sharees), the `syncplay` ready callback, the host flow
++ `LobbyDialog`, the `InviteDialog` picker, home menu entries, the guest lobby,
+the whole-branch review fixes, and the live-test fixes (host lobby mode, lobby
+over Home, ESC handling, friend-name fallback, focus defaults, diagnostics
+strip). Nothing outstanding.
 
 Still separate: the templating staleness fix (`48a78163`) — cherry-picked to
 `fix/template-staleness` (PR #299 against `pannal:develop_kodi21`); NOT part of
 the WT squash.
 
-Known caveats shipped on the squash branch (`8a8ec00f`, `84e9d3a8`): tempo
-catch-up only truly applies on Kodi 21.1+ (on 21.0 `Player.SetTempo` is refused;
-the bridge logs once and hard-seeks), and auto-join rejoins the session but does
-not auto-start playback.
+Known caveats shipped on the squash branch (`8a8ec00f`, `84e9d3a8`,
+`aedf3899`): tempo catch-up only truly applies on Kodi 21.1+ (on 21.0
+`Player.SetTempo` is refused; the bridge logs once and hard-seeks); auto-join
+rejoins the session but does not auto-start playback; the host lobby runs over
+Home (the video opens on Start, so a short start delay) because a modal dialog
+shown over the video leaves input focus on the video window; the friends list
+comes from an undocumented community GraphQL endpoint (degrades to home users
+when it fails).
 
 Join-time startup stutter (observed live, left as-is): joining a room opens the
 video at offset 0, then the first relay `State` makes the bridge seek to the
@@ -108,9 +114,11 @@ Rule 6 requires this to be pasted (and kept current) into the PR description
 when `feature/watch-together-squash` is pushed. Copy from the block below.
 
 ```markdown
-# Plex Watch Together — Home hub, join/leave, OSD sync
+# Plex Watch Together — Home hub, join/leave, host lobby
 
-Adds Plex Watch Together as a guest client:
+Adds Plex Watch Together to PM4K.
+
+**Guest**
 
 - Rooms appear as the **first Home hub**, hidden when there are none.
 - A tile joins the room (confirm on takeover / switching rooms); while watching
@@ -122,19 +130,33 @@ Adds Plex Watch Together as a guest client:
 - Leaving sends `DELETE` (drops membership); stopping playback only
   disconnects, keeping membership so the tile can rejoin.
 
+**Host**
+
+- Start a room from a movie/episode: it is created on the cloud, a lobby opens,
+  and the item plays once the room starts.
+- Invite your Plex friends and Home users from a picker. On an item from a
+  server you own, only friends who can reach that server are offered; items on a
+  server shared to you are offered with an "access unknown" note.
+- The lobby shows the media title and each participant's Ready/Invited status
+  and auto-starts when every invited member is ready (or the host presses
+  Start). A guest sees the same lobby read-only while the room is unstarted.
+- Invite more people later from the room tile menu.
+
 ## Known limitations
 
 - **Tempo catch-up needs Kodi 21.1+.** On 21.0 `Player.SetTempo` is refused; the
   bridge logs once and falls back to a hard seek. (Hard-seek sync still works.)
-- **Auto-join does not auto-start playback.** If enabled, it rejoins the session
-  on startup but the user still starts playback themselves.
+- **The host lobby runs over Home.** A modal dialog shown over the video leaves
+  input focus on the video window, so the host's video opens on Start instead —
+  a short start delay rather than a pre-buffered video.
 - **Joining a room can stutter for the first few seconds.** Playback opens at 0
   and then syncs to the room's position; the seek's buffer refill — plus a second
   corrective seek that lands while it is still refilling — freezes briefly. Sync
-  is stable afterwards. Not fixed here; the fix is to open the video at the room
-  position instead of seeking into it.
-- **Guest-only in v1.** Creating/inviting to rooms (host capability) is planned
-  for a follow-up.
+  is stable afterwards.
+- **Friends come from an undocumented community GraphQL endpoint.** It degrades
+  to Home users when it fails.
+- **Auto-join does not auto-start playback.** If enabled, it rejoins the session
+  on startup but the user still starts playback themselves.
 
 Not included: the templating staleness fix, tracked separately (PR #299).
 ```
