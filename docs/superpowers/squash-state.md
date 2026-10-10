@@ -31,10 +31,9 @@ redaction note below.
 ## 2026-10-10 redaction rewrite
 
 The squash branch shipped real PII in test fixtures from the first WT commit:
-`tests/test_syncplay.py` used a real plex account id (`2028816`), and
-`tests/test_watchtogether_hub.py` used real usernames / display titles
-(`michiel`, `yogarine`, `Amanda & Michiel`, `Alwin & Andréa`). The local
-redaction map (`REDACTION-LOCAL-not-commit.md`, never committed) has the
+`tests/test_syncplay.py` used a real plex account id, and
+`tests/test_watchtogether_hub.py` used real usernames / display titles. The
+local redaction map (`REDACTION-LOCAL-not-commit.md`, never committed) has the
 real→placeholder mapping.
 
 Fix: the fixtures were replaced with the map's placeholders on the impl branch

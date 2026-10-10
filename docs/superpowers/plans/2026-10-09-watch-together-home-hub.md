@@ -70,8 +70,8 @@ ROOM = {
     "title": "A Fazenda · T18 · E25 · Episode 25",
     "sourceUri": "server://abc/com.plexapp.plugins.library/library/metadata/227117",
     "users": [
-        {"id": 1, "username": "michiel", "title": "Amanda & Michiel"},
-        {"id": 2, "username": "yogarine", "title": "Alwin & Andréa"},
+        {"id": 1, "username": "serverowner", "title": "Server Owner"},
+        {"id": 2, "username": "otherviewer", "title": "Other Viewer"},
     ],
 }
 
@@ -84,7 +84,7 @@ class ParticipantNamesTest(KodiTestCase):
         self.assertEqual(self.names([]), "")
 
     def test_one_user(self):
-        self.assertEqual(self.names([{"title": "Amanda"}]), "Amanda")
+        self.assertEqual(self.names([{"title": "Server Owner"}]), "Server Owner")
 
     def test_two_users_joined_with_and(self):
         self.assertEqual(self.names([{"title": "A"}, {"title": "B"}]), "A and B")
@@ -94,7 +94,7 @@ class ParticipantNamesTest(KodiTestCase):
                          "A, B and C")
 
     def test_falls_back_to_username(self):
-        self.assertEqual(self.names([{"username": "yogarine"}]), "yogarine")
+        self.assertEqual(self.names([{"username": "otherviewer"}]), "otherviewer")
 
 
 class RoomItemTest(KodiTestCase):
@@ -105,7 +105,7 @@ class RoomItemTest(KodiTestCase):
         item = self.item("http://img/1")
         self.assertEqual(item.type, "watchtogether")
         self.assertEqual(item.title, ROOM["title"])
-        self.assertEqual(item.subtitle, "Amanda & Michiel and Alwin & Andréa")
+        self.assertEqual(item.subtitle, "Server Owner and Other Viewer")
         self.assertEqual(item.image, "http://img/1")
         self.assertFalse(item.cachable)
 
