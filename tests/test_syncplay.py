@@ -24,8 +24,8 @@ class IdentityTest(unittest.TestCase):
         self.assertNotIn(" ", ident, "relay echoes bytes as-is; stay compact (§5.1)")
 
     def test_numeric_user_id_becomes_string(self):
-        ident = syncplay.build_identity("d", "K", 2028816)
-        self.assertIn('"userID":"2028816"', ident)
+        ident = syncplay.build_identity("d", "K", 1000001)
+        self.assertIn('"userID":"1000001"', ident)
 
     def test_rejects_identity_at_150_bytes(self):
         # 150+ bytes get blind-truncated mid-string by the relay (§5.1)
