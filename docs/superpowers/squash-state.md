@@ -13,27 +13,48 @@ ignores `docs/superpowers/`; the impl branch tracks it), and the excluded
 templating staleness fix (`lib/templating/render.py`, `tests/test_templates.py`
 — see rule 3). All three differences are expected.
 
-Base `2707bbe7` (`1.14.1`), then:
+Base `2707bbe7` (`1.14.1`), then (SHAs as of the **2026-10-10 redaction
+rewrite**; the pre-rewrite SHAs `27f7dda8`/`198cf1a3`/`8a8ec00f`/`84e9d3a8`/
+`aedf3899` are dead — see the note below):
 
-- `27f7dda8` chore: uv dev tooling and Watch Together protocol research
-- `198cf1a3` feat(watchtogether): Phase 1 protocol library
-- `8a8ec00f` feat(watchtogether): Phase 2 Kodi UI integration
-- `84e9d3a8` feat(watchtogether): hub room menu, OSD controls, dialogs
-- `aedf3899` feat(watchtogether): host capability — create, invite, lobby  ← current tip
+- `61c55624` chore: uv dev tooling and Watch Together protocol research
+- `5eeebc88` feat(watchtogether): Phase 1 protocol library
+- `fcb146b6` feat(watchtogether): Phase 2 Kodi UI integration
+- `a49018d1` feat(watchtogether): hub room menu, OSD controls, dialogs
+- `e3feea9d` feat(watchtogether): host capability — create, invite, lobby  ← current tip
 
-**Not pushed.** The squash branch is local only; push it only when explicitly
-asked.
+**Pushed** to `origin` (the fork) and open as **PR #300** against
+`pannal:develop_kodi21` (`mvanbaak:feature/watch-together-squash`). The branch
+was **force-pushed on 2026-10-10** to scrub real PII from its history — see the
+redaction note below.
+
+## 2026-10-10 redaction rewrite
+
+The squash branch shipped real PII in test fixtures from the first WT commit:
+`tests/test_syncplay.py` used a real plex account id (`2028816`), and
+`tests/test_watchtogether_hub.py` used real usernames / display titles
+(`michiel`, `yogarine`, `Amanda & Michiel`, `Alwin & Andréa`). The local
+redaction map (`REDACTION-LOCAL-not-commit.md`, never committed) has the
+real→placeholder mapping.
+
+Fix: the fixtures were replaced with the map's placeholders on the impl branch
+(`3c01aec1`), and the squash branch's **whole history** was rewritten with
+`git filter-branch --tree-filter` (applying the same substitutions) and
+force-pushed. Every squash-branch SHA changed; the pre-rewrite SHAs are dead.
+
+Lessons: the redaction grep must scan the **whole tree**, not just `docs/`
+(rule 4), and test fixtures are a real leak surface.
 
 ## Rules for future squashes
 
-1. **Everything up to `5f33755b` on `feature/watch-together-impl` is already
-   squashed** (into the squash branch: `8a8ec00f`, `84e9d3a8`, then
-   `aedf3899`). Do not re-squash those commits. The granular history lives on
+1. **Everything up to `f67fcc89` on `feature/watch-together-impl` is already
+   squashed** (into the squash branch: `fcb146b6`, `a49018d1`, then
+   `e3feea9d`). Do not re-squash those commits. The granular history lives on
    the impl branch only and stays there.
 2. Development continues on `feature/watch-together-impl` with granular
    commits.
 3. To update the shareable branch, squash **only the commits added after
-   `5f33755b`** and append the result to `feature/watch-together-squash` as a
+   `f67fcc89`** and append the result to `feature/watch-together-squash` as a
    single commit. Recipe (run from the repo root):
 
    ```bash
@@ -67,7 +88,7 @@ asked.
 4. Verification after every squash: the command in the recipe prints
    **only `.gitignore`**, and `uv run pytest -q` is green on the squash branch.
    Baselines: 805 passed at Phase 1 exit, 945 at Phase 2 exit, 956 at the
-   `84e9d3a8` squash, **1050 at the `aedf3899` squash**.
+   `a49018d1` squash, **1050 at the `e3feea9d` squash**.
 
    **Also run a whole-tree redaction grep before pushing — not just `docs/`.**
    The 2026-10-10 leak lived in test fixtures (`tests/test_syncplay.py`,
@@ -83,7 +104,7 @@ asked.
 
 ## Follow-ups not yet squashed
 
-Squashed into `aedf3899` (impl marker `5f33755b`): the v2 host capability —
+Squashed into `e3feea9d` (impl marker `f67fcc89`): the v2 host capability —
 `RoomsApi.create`/`invite`, the `plexpeople` eligibility helper (community
 GraphQL friends + server sharees), the `syncplay` ready callback, the host flow
 + `LobbyDialog`, the `InviteDialog` picker, home menu entries, the guest lobby,
@@ -95,8 +116,8 @@ Still separate: the templating staleness fix (`48a78163`) — cherry-picked to
 `fix/template-staleness` (PR #299 against `pannal:develop_kodi21`); NOT part of
 the WT squash.
 
-Known caveats shipped on the squash branch (`8a8ec00f`, `84e9d3a8`,
-`aedf3899`): tempo catch-up only truly applies on Kodi 21.1+ (on 21.0
+Known caveats shipped on the squash branch (`fcb146b6`, `a49018d1`,
+`e3feea9d`): tempo catch-up only truly applies on Kodi 21.1+ (on 21.0
 `Player.SetTempo` is refused; the bridge logs once and hard-seeks); auto-join
 rejoins the session but does not auto-start playback; the host lobby runs over
 Home (the video opens on Start, so a short start delay) because a modal dialog
