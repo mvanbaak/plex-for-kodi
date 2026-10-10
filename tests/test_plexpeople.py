@@ -167,3 +167,9 @@ def test_http_never_raises_on_a_failed_request():
     status, _ct, body = plexpeople._http("GET", "http://127.0.0.1:1/nope", {})
     assert status == 0
     assert body == b""
+
+
+def test_friends_str_body_degrades():
+    # an injected http returning str (not bytes) must not raise
+    out = plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", "[]"))
+    assert out == []

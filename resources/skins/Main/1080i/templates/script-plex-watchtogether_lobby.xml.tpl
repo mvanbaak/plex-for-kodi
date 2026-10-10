@@ -214,7 +214,7 @@
             <textoffsetx>70</textoffsetx>
             <textcolor>FF000000</textcolor>
             <focusedcolor>FF000000</focusedcolor>
-            <label>$ADDON[script.plexmod 35071]</label>
+            <label>$ADDON[script.plexmod 35085]</label>
         </control>
         <control type="button" id="61">
             <visible>!String.IsEmpty(Window.Property(is_host))</visible>

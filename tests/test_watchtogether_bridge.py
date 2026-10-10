@@ -314,13 +314,13 @@ class LobbyRowsTest(KodiTestCase):
     def test_lobby_rows_marks_ready_and_invited(self):
         room = self.room([{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
         roster = {syncplay.build_identity("d", "n", 1): {"isReady": True}}
-        rows = wtwin.lobby_rows(room, roster, live_ids={"1", "2"})
+        rows = wtwin.lobby_rows(room, roster)
         self.assertEqual([r["status"] for r in rows], ["Ready", "Invited"])
         self.assertEqual([r["title"] for r in rows], ["A", "B"])
 
     def test_lobby_rows_falls_back_to_username_and_thumb(self):
         room = self.room([{"id": 1, "username": "u1", "thumb": "/t.png"}])
-        rows = wtwin.lobby_rows(room, {}, live_ids=set())
+        rows = wtwin.lobby_rows(room, {})
         self.assertEqual(rows, [{"title": "u1", "thumb": "/t.png",
                                  "status": "Invited"}])
 
@@ -330,12 +330,12 @@ class LobbyDialogTest(KodiTestCase):
 
     def test_lobby_dialog_read_only_hides_start(self):
         d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
-                              live_ids=set(), host=False)
+                              host=False)
         self.assertIs(d.is_host, False)   # dialog hides Start/Cancel in guest mode
 
     def test_lobby_dialog_host_mode(self):
         d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
-                              live_ids=set(), host=True)
+                              host=True)
         self.assertIs(d.is_host, True)
 
     def test_lobby_back_cancels_for_the_host(self):
@@ -344,7 +344,7 @@ class LobbyDialogTest(KodiTestCase):
         wtwin.bridge.cancel_hosting = lambda: calls.append("cancel")
         try:
             d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
-                                  live_ids=set(), host=True)
+                                  host=True)
             d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
         finally:
             wtwin.bridge.cancel_hosting = saved
@@ -356,7 +356,7 @@ class LobbyDialogTest(KodiTestCase):
         wtwin.bridge.leave = lambda: calls.append("leave")
         try:
             d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
-                                  live_ids=set(), host=False)
+                                  host=False)
             d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
         finally:
             wtwin.bridge.leave = saved
@@ -375,7 +375,7 @@ class LobbyDialogTest(KodiTestCase):
             def addItems(self, items):
                 self.items += items
 
-        d = wtwin.LobbyDialog(room=room, roster={}, live_ids=set(), host=True)
+        d = wtwin.LobbyDialog(room=room, roster={}, host=True)
         d.peopleList = FakeList()
         d._sync()
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
@@ -403,7 +403,7 @@ class LobbyDialogTest(KodiTestCase):
             wtwin.bridge.room = watchtogether.Room(
                 {"id": "r", "users": [{"id": 1, "title": "A"}]})
             d = wtwin.LobbyDialog(room=watchtogether.Room({"id": "r", "users": []}),
-                                  roster={}, live_ids=set(), host=True)
+                                  roster={}, host=True)
             d.peopleList = FakeList()
             wtwin.bridge.room = watchtogether.Room(
                 {"id": "r", "users": [{"id": 1, "title": "A"},
@@ -468,6 +468,24 @@ class InviteDialogTest(KodiTestCase):
         self.assertEqual(d._selected_ids(), [])
         d.peopleList.items[1].setProperty("selected", "1")
         self.assertEqual(d._selected_ids(), [2])
+
+    def test_fetch_degrades_when_invitees_raises(self):
+        # a people lookup failure must not break the picker
+        saved = wtwin.bridge.invitees
+        synced = []
+
+        def boom(*a, **k):
+            raise ValueError("people lookup failed")
+
+        wtwin.bridge.invitees = boom
+        try:
+            d = self.dialog()
+            d._sync = lambda: synced.append(True)
+            d._fetch()
+        finally:
+            wtwin.bridge.invitees = saved
+        self.assertEqual(d._invitees, [])
+        self.assertEqual(synced, [True])
 
     def test_fetch_uses_the_dialog_room(self):
         # a picker opened from a room tile must query that tile's room, not

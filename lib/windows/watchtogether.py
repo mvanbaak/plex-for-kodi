@@ -85,13 +85,11 @@ def room_info_rows(room, live_ids):
     return rows
 
 
-def lobby_rows(room, roster, live_ids):
+def lobby_rows(room, roster):
     """One row per room user for the lobby, with readiness status.
 
     Status is "Ready" when the user's id is on the roster with isReady True,
-    else "Invited" (they have not joined/readied yet). `live_ids` is accepted
-    for parity with room_info_rows; readiness already implies a live roster
-    entry, so it does not affect the status."""
+    else "Invited" (they have not joined/readied yet)."""
     ready = syncplay.ready_member_ids(roster)
     rows = []
     for user in (room.participants if room else []):
@@ -536,7 +534,7 @@ class WatchTogetherBridge(object):
         roster = sup.session.roster \
             if sup is not None and sup.session is not None else {}
         lobby = LobbyDialog.create(show=False, room=self.room, roster=roster,
-                                   live_ids=self._live_user_ids(), host=host)
+                                   host=host)
         self.lobby = lobby
         lobby.modal()               # blocks (main thread) until the lobby closes
         if self.lobby is lobby:
@@ -1228,7 +1226,6 @@ class LobbyDialog(kodigui.BaseDialog):
         kodigui.BaseDialog.__init__(self, *args, **kwargs)
         self.room = kwargs.get('room')
         self.roster = kwargs.get('roster') or {}
-        self.live_ids = kwargs.get('live_ids') or set()
         self.is_host = bool(kwargs.get('host'))
 
     def onFirstInit(self):
@@ -1240,16 +1237,19 @@ class LobbyDialog(kodigui.BaseDialog):
         self.setFocusId(self.START_ID if self.is_host else self.LEAVE_ID)
 
     def refresh(self):
-        """Re-read the roster and repaint (called from the supervisor thread
-        on a roster/readiness change — never raise). Membership comes from
+        """Re-read the roster and repaint (called from the supervisor thread on
+        a roster/readiness change — never raise). Membership comes from
         bridge.room in _sync, so an invitee added by the 15 s poll appears."""
         if getattr(self, 'peopleList', None) is None:
             return          # window not initialised yet: nothing to repaint
         sup = bridge.supervisor
         if sup is not None and sup.session is not None:
             self.roster = sup.session.roster
-        self.live_ids = bridge._live_user_ids()
-        self._sync()
+        try:
+            self._sync()
+        except Exception:
+            # never tear down the supervisor thread that called us
+            util.ERROR()
 
     def _sync(self):
         # the open lobby must follow the bridge's live room (on_roster replaces
@@ -1258,7 +1258,7 @@ class LobbyDialog(kodigui.BaseDialog):
         items = [kodigui.ManagedListItem(row['title'], row['status'],
                                          thumbnailImage=row['thumb'],
                                          data_source=room)
-                 for row in lobby_rows(room, self.roster, self.live_ids)]
+                 for row in lobby_rows(room, self.roster)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
