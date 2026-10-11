@@ -1149,6 +1149,19 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertEqual(sup.sent[-1]["paused"], False,
                          "the applied resume must be published at once")
 
+    def test_remote_seek_republishes_the_target_position(self):
+        # a stale position in the snapshot would make the peer seek back
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        dialog = FakeDialog()
+        self.player.handler.dialog = dialog
+        target = self.player.position + 10
+        self.bridge.on_state(self.remote(target, paused=False))
+        self.assertEqual(dialog.seeks, [int(target * 1000)])
+        self.assertEqual(sup.sent[-1]["position"], target,
+                         "the applied seek must be published at once")
+        self.assertEqual(sup.sent[-1]["doSeek"], False)
+
     def test_remote_resume_applies(self):
         self.player.paused = True
         self.bridge.supervisor = FakeSupervisor()

@@ -760,13 +760,6 @@ class WatchTogetherBridge(object):
             pl.wt_applying_remote = time.monotonic() + 2.0
             pl.control("pause" if want_paused else "play")
             self._set_tempo(1.0)
-            # feed the snapshot now: Player.Paused lags the command by a few ms,
-            # and the supervisor sends the last snapshot it was handed, so its
-            # next 1 Hz beat would publish the pre-pause one - last-setBy wins,
-            # the room flips back to playing and the peer resumes (seen live as
-            # the browser pausing, resuming, then pausing again)
-            sup.outbound_state({"position": remote.get("position", local_pos),
-                                "paused": want_paused, "doSeek": False})
             applied = True
         if remote.get("doSeek"):
             # §5.6: a peer's explicit seek command — apply even inside the
@@ -794,6 +787,18 @@ class WatchTogetherBridge(object):
         else:
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
+            # Feed the state we just applied. The supervisor only *stores* this
+            # snapshot and its 1 Hz loop is the single sender, so its next beat
+            # would otherwise publish the pre-apply one - last-setBy wins, the
+            # room flips back and the peer undoes us: a stale paused made the
+            # browser resume (seen live as pause/resume/pause), and a stale
+            # position would make it seek back. Player.Paused and getTime() both
+            # lag their commands by a few ms, so read neither here.
+            sup.outbound_state({
+                "position": remote.get("position", local_pos),
+                "paused": want_paused if want_paused is not None else is_paused,
+                "doSeek": False,
+            })
             util.DEBUG_LOG("Watch Together: applied remote {0} (paused={1}, pos={2})".format(
                 action, want_paused, remote.get("position")))
 
