@@ -3398,17 +3398,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         )
         return button == 0
 
-    def _confirm_start_watch_together(self):
-        button = optionsdialog.show(
-            T(35053, 'Watch Together'),
-            T(35081, 'Leave the current room and start a new one?'),
-            T(32328, 'Yes'),
-            T(32329, 'No'),
-            dialog_props=self.carriedProps
-        )
-        return button == 0
-
     def hubMenu(self, hubControlID):
+        from . import watchtogether as wtwin
         hub = self.currentHub
         if not hub:
             return
@@ -3493,12 +3484,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     options.insert(0, dropdown.SEPARATOR)
                     options.insert(1, {'key': 'start_over', 'display': T(32317, 'Play from beginning')})
                     options.insert(2, {'key': 'resume', 'display': T(32429, "Resume from {}").format(util.timeDisplay(ds.viewOffset.asInt()).lstrip('0').lstrip(':'))})
-                # Only offer hosting when the item's server/ratingKey resolve
-                # (Review Focus 4: no sourceUri otherwise). A server without a
-                # uuid also yields an unresolvable sourceUri.
-                if ds.server and getattr(ds.server, "uuid", None) and ds.ratingKey:
-                    options.append({'key': 'start_watch_together',
-                                    'display': T(35080, 'Start Watch Together')})
+                # Only offered when the item's server/ratingKey resolve (see
+                # host_menu_entry): no sourceUri otherwise.
+                entry = wtwin.host_menu_entry(ds)
+                if entry:
+                    options.append(entry)
 
 
             if ds.TYPE in ('episode', 'season'):
@@ -3626,12 +3616,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 util.DEBUG_LOG("Couldn't clear cache: {}", e)
 
         elif choice["key"] == "start_watch_together":
-            from . import watchtogether as wtwin
-            # host() leaves the current room unconfirmed; ask first (mirrors
-            # room_clicked's confirm_switch).
-            if wtwin.bridge.supervisor is not None and not self._confirm_start_watch_together():
-                return
-            wtwin.bridge.host(ds)
+            # host() leaves the current room; start_hosting() asks first
+            # (mirrors room_clicked's confirm_switch).
+            wtwin.start_hosting(ds, dialog_props=self.carriedProps)
 
     def sectionMover(self, item, action):
         def stop_moving(reset=False):

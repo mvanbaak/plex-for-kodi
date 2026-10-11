@@ -214,6 +214,40 @@ def confirm_leave():
     return button == 0
 
 
+def host_menu_entry(item):
+    """The "Start Watch Together" dropdown entry for `item`, or None when the
+    item cannot resolve a sourceUri (no server uuid / ratingKey).
+
+    Shared by the episodes view, the pre-play screen and Home, so the
+    eligibility rule lives in one place."""
+    server = getattr(item, "server", None)
+    if not (server is not None and getattr(server, "uuid", None)
+            and getattr(item, "ratingKey", None)):
+        return None
+    return {"key": "start_watch_together",
+            "display": util.T(35080, "Start Watch Together")}
+
+
+def confirm_host(dialog_props=None):
+    """Confirm starting a new room when one is already joined: host() leaves the
+    current room, so ask first (mirrors confirm_switch)."""
+    from . import optionsdialog
+    button = optionsdialog.show(
+        util.T(35053, "Watch Together"),
+        util.T(35081, "Leave the current room and start a new one?"),
+        util.T(32328, "Yes"),
+        util.T(32329, "No"),
+        dialog_props=dialog_props)
+    return button == 0
+
+
+def start_hosting(item, dialog_props=None):
+    """Confirm when a room is already joined, then host `item`."""
+    if bridge.supervisor is not None and not confirm_host(dialog_props):
+        return
+    bridge.host(item)
+
+
 def _ws_factory(host, port, on_open, on_message, on_close):
     return ws.WSClient(host, port, on_message, on_open=on_open, on_close=on_close)
 

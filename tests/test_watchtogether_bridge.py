@@ -453,6 +453,57 @@ class LobbyDialogTest(KodiTestCase):
         d._sync()               # must be a no-op, not a native call
 
 
+class HostMenuEntryTest(KodiTestCase):
+    """The item-menu entry that starts a room, shared by the episodes view, the
+    pre-play screen and Home."""
+
+    def test_offered_for_an_eligible_item(self):
+        entry = wtwin.host_menu_entry(FakeItem())
+        self.assertEqual(entry["key"], "start_watch_together")
+        self.assertEqual(entry["display"],
+                         util.T(35080, "Start Watch Together"))
+
+    def test_not_offered_without_a_server(self):
+        item = FakeItem()
+        item.server = None
+        self.assertIsNone(wtwin.host_menu_entry(item))
+
+    def test_not_offered_without_a_server_uuid(self):
+        # no uuid -> sourceUri cannot resolve, so the room could not be created
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(machine=None)))
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(machine="")))
+
+    def test_not_offered_without_a_rating_key(self):
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(rating_key=None)))
+
+    def test_start_hosting_hosts_straight_away_without_a_room(self):
+        saved_host, saved_sup = wtwin.bridge.host, wtwin.bridge.supervisor
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = None
+        try:
+            wtwin.start_hosting(FakeItem())
+        finally:
+            wtwin.bridge.host, wtwin.bridge.supervisor = saved_host, saved_sup
+        self.assertEqual(len(hosted), 1, "nothing joined: no confirm, just host")
+
+    def test_start_hosting_confirms_before_leaving_a_room(self):
+        saved = (wtwin.bridge.host, wtwin.bridge.supervisor, wtwin.confirm_host)
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = object()
+        try:
+            wtwin.confirm_host = lambda *a, **k: False
+            wtwin.start_hosting(FakeItem())
+            self.assertEqual(hosted, [], "declined: must not leave the room")
+            wtwin.confirm_host = lambda *a, **k: True
+            wtwin.start_hosting(FakeItem())
+        finally:
+            (wtwin.bridge.host, wtwin.bridge.supervisor,
+             wtwin.confirm_host) = saved
+        self.assertEqual(len(hosted), 1, "confirmed: host the new room")
+
+
 class InviteRowsTest(KodiTestCase):
     """invite_rows: the invite picker's list-item properties."""
 

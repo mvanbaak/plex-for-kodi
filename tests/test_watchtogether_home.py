@@ -8,6 +8,8 @@ from kodienv import ENV
 ENV.abort_requested = True
 from lib import watchtogether  # noqa: E402
 from lib.windows import home  # noqa: E402
+from lib.windows import episodes  # noqa: E402
+from lib.windows import preplay  # noqa: E402
 from lib.windows import watchtogether as wtwin  # noqa: E402
 from lib.windows.home import HomeWindow  # noqa: E402
 
@@ -282,17 +284,23 @@ class _Count(object):
 
 
 class Movie(object):
-    """Minimal PlexObject surface hubMenu reads for a movie/episode item."""
+    """Minimal PlexObject surface the hub/pre-play/episodes menus read for a
+    movie or episode item."""
 
     def __init__(self, machine="m", rating_key="1", type_="movie"):
         self.server = _Server(machine) if machine is not None else None
         self.ratingKey = rating_key
         self.TYPE = type_
+        self.type = type_
         self.title = "T"
         self.isFullyWatched = False
         self.isWatched = False
+        self.viewOffset = _Count(0)
         self.viewedLeafCount = _Count(0)
         self.in_progress = False
+
+    def getLibrarySectionTitle(self):
+        return "Movies"
 
 
 class _Hub(object):
@@ -327,6 +335,129 @@ class _Control(object):
         return self._mli
 
 
+class _Show(object):
+    def getLibrarySectionTitle(self):
+        return "TV Shows"
+
+
+class _Account(object):
+    isAdmin = False
+
+
+class _PlexApp(object):
+    ACCOUNT = _Account()
+
+
+class EpisodeMenuEntryTest(KodiTestCase):
+    """The same Start Watch Together entry in the episodes view's 3-dots menu."""
+
+    def setUp(self):
+        super(EpisodeMenuEntryTest, self).setUp()
+        self._saved_dropdown = episodes.dropdown.showDropdown
+        self._saved_host = wtwin.bridge.host
+        self._saved_supervisor = wtwin.bridge.supervisor
+        self._saved_confirm = wtwin.confirm_host
+        self._saved_plexapp = episodes.plexapp
+        episodes.plexapp = _PlexApp()
+        ENV.settings["cache_requests"] = "[]"
+
+    def tearDown(self):
+        episodes.dropdown.showDropdown = self._saved_dropdown
+        wtwin.bridge.host = self._saved_host
+        wtwin.bridge.supervisor = self._saved_supervisor
+        wtwin.confirm_host = self._saved_confirm
+        episodes.plexapp = self._saved_plexapp
+        super(EpisodeMenuEntryTest, self).tearDown()
+
+    def _menu(self, ds, choice=None):
+        captured = []
+
+        def show(options, *a, **k):
+            captured.extend(options)
+            return {"key": choice} if choice else None
+
+        episodes.dropdown.showDropdown = show
+        win = episodes.EpisodesWindow.__new__(episodes.EpisodesWindow)
+        win.episodeListControl = _Control(_MLI(ds), None)
+        win.season = None
+        win.show_ = _Show()
+        win.optionsButtonClicked()
+        return [o for o in captured if o]
+
+    def test_offered_for_an_eligible_episode(self):
+        opts = self._menu(Movie(type_="episode"))
+        assert any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_hidden_without_a_resolvable_source(self):
+        opts = self._menu(Movie(machine=None, rating_key=None, type_="episode"))
+        assert not any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_choosing_it_hosts_the_episode(self):
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = None
+        ds = Movie(type_="episode")
+        self._menu(ds, choice="start_watch_together")
+        self.assertEqual(hosted, [ds])
+
+
+class PrePlayMenuEntryTest(KodiTestCase):
+    """The same entry on the item's pre-play/detail screen (movies and
+    episodes)."""
+
+    def setUp(self):
+        super(PrePlayMenuEntryTest, self).setUp()
+        self._saved_dropdown = preplay.dropdown.showDropdown
+        self._saved_host = wtwin.bridge.host
+        self._saved_supervisor = wtwin.bridge.supervisor
+        self._saved_confirm = wtwin.confirm_host
+        self._saved_plexapp = preplay.plexapp
+        preplay.plexapp = _PlexApp()
+        ENV.settings["cache_requests"] = "[]"
+
+    def tearDown(self):
+        preplay.dropdown.showDropdown = self._saved_dropdown
+        wtwin.bridge.host = self._saved_host
+        wtwin.bridge.supervisor = self._saved_supervisor
+        wtwin.confirm_host = self._saved_confirm
+        preplay.plexapp = self._saved_plexapp
+        super(PrePlayMenuEntryTest, self).tearDown()
+
+    def _menu(self, ds, choice=None):
+        captured = []
+
+        def show(options, *a, **k):
+            captured.extend(options)
+            return {"key": choice} if choice else None
+
+        preplay.dropdown.showDropdown = show
+        win = preplay.PrePlayWindow.__new__(preplay.PrePlayWindow)
+        win.video = ds
+        win.getProperty = lambda key: None       # no trailer button
+        win.optionsButtonClicked()
+        return [o for o in captured if o]
+
+    def test_offered_for_a_movie(self):
+        opts = self._menu(Movie(type_="movie"))
+        assert any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_offered_for_an_episode(self):
+        opts = self._menu(Movie(type_="episode"))
+        assert any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_hidden_without_a_resolvable_source(self):
+        opts = self._menu(Movie(machine=None, rating_key=None))
+        assert not any(o["key"] == "start_watch_together" for o in opts)
+
+    def test_choosing_it_hosts_the_item(self):
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = None
+        ds = Movie(type_="movie")
+        self._menu(ds, choice="start_watch_together")
+        self.assertEqual(hosted, [ds])
+
+
 class EntryMenuTest(KodiTestCase):
     """The Start Watch Together / Invite entries (Review Focus 4: hidden when
     the item has no resolvable source)."""
@@ -340,7 +471,7 @@ class EntryMenuTest(KodiTestCase):
         self._saved_supervisor = wtwin.bridge.supervisor
         self._saved_room = wtwin.bridge.room
         self._saved_open = wtwin.InviteDialog.open
-        self._saved_confirm = HomeWindow._confirm_start_watch_together
+        self._saved_confirm = wtwin.confirm_host
         # hubMenu reads cache_requests via util.getSetting; the harness has no
         # registered default, so give it a JSON list (it is a JSON setting) to
         # keep 'items' in <setting> from raising on None.
@@ -352,7 +483,7 @@ class EntryMenuTest(KodiTestCase):
         wtwin.bridge.supervisor = self._saved_supervisor
         wtwin.bridge.room = self._saved_room
         wtwin.InviteDialog.open = self._saved_open
-        HomeWindow._confirm_start_watch_together = self._saved_confirm
+        wtwin.confirm_host = self._saved_confirm
         super(EntryMenuTest, self).tearDown()
 
     def _capture(self, choice=None):
@@ -418,7 +549,7 @@ class EntryMenuTest(KodiTestCase):
         hosted = []
         wtwin.bridge.host = hosted.append
         wtwin.bridge.supervisor = None
-        HomeWindow._confirm_start_watch_together = lambda self: (_ for _ in ()).throw(
+        wtwin.confirm_host = lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("must not confirm when not in a room"))
         ds = Movie()
         self.menu_options(ds=ds, choice="start_watch_together")
@@ -429,10 +560,10 @@ class EntryMenuTest(KodiTestCase):
         wtwin.bridge.host = hosted.append
         wtwin.bridge.supervisor = object()      # already connected to a room
         ds = Movie()
-        HomeWindow._confirm_start_watch_together = lambda self: False
+        wtwin.confirm_host = lambda *a, **k: False
         self.menu_options(ds=ds, choice="start_watch_together")
         self.assertEqual(hosted, [])
-        HomeWindow._confirm_start_watch_together = lambda self: True
+        wtwin.confirm_host = lambda *a, **k: True
         self.menu_options(ds=ds, choice="start_watch_together")
         self.assertEqual(hosted, [ds])
 
