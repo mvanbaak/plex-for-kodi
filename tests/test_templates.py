@@ -369,9 +369,14 @@ class TemplateStalenessTest(KodiTestCase):
             open(os.path.join(gen, "script-plex-{0}.xml".format(name)), "w").close()
         self.assertFalse(templates_need_render(tpl, gen))
 
-        # remove one template and add another: counts stay equal, but the new
-        # template's generated XML is missing, so a render is required
+        # remove one template and add another: counts stay equal (2 vs 2), so a
+        # count-based check would miss it, but the new template's generated XML
+        # is missing, so a render is required
         os.remove(os.path.join(tpl, "script-plex-a.xml.tpl"))
-        os.remove(os.path.join(gen, "script-plex-a.xml"))
         open(os.path.join(tpl, "script-plex-c.xml.tpl"), "w").close()
         self.assertTrue(templates_need_render(tpl, gen))
+
+        # once c.xml has been generated, the stale a.xml left behind by the
+        # removed template must not force another render
+        open(os.path.join(gen, "script-plex-c.xml"), "w").close()
+        self.assertFalse(templates_need_render(tpl, gen))
