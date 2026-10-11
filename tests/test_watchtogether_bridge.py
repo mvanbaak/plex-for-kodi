@@ -1129,6 +1129,26 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertGreater(self.player.wt_applying_remote, time.monotonic(),
                            "echo deadline must be armed across the apply")
 
+    def test_remote_pause_republishes_the_paused_state(self):
+        # the supervisor sends the last snapshot it was fed, so applying a
+        # remote pause must feed it now: otherwise its next 1 Hz beat publishes
+        # the pre-pause snapshot, the relay adopts it (last-setBy wins) and the
+        # peer resumes - seen live as the browser pausing, resuming, pausing
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_state(self.remote(self.player.position, paused=True))
+        self.assertEqual(sup.sent[-1]["paused"], True,
+                         "the applied pause must be published at once")
+        self.assertEqual(sup.sent[-1]["doSeek"], False)
+
+    def test_remote_resume_republishes_the_resumed_state(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.paused = True
+        self.bridge.on_state(self.remote(self.player.position, paused=False))
+        self.assertEqual(sup.sent[-1]["paused"], False,
+                         "the applied resume must be published at once")
+
     def test_remote_resume_applies(self):
         self.player.paused = True
         self.bridge.supervisor = FakeSupervisor()
