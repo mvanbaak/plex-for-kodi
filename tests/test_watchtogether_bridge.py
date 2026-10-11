@@ -972,7 +972,55 @@ class HostFlowTest(BridgeTestCase):
         self.assertEqual(self.bridge.invite([9]), [])
         self.assertIn(9, self.bridge.room.user_ids,
                       "the response room replaced the stale one")
-        self.assertEqual(lobby.refreshes, 1, "the open lobby was repainted")
+        self.assertGreaterEqual(lobby.refreshes, 1,
+                                "the open lobby was repainted")
+
+    def test_invite_applies_when_a_poll_replaced_the_room_object(self):
+        # the 15 s roster poll replaces bridge.room with a fresh Room, so an
+        # identity check against the picker's snapshot fails - and then neither
+        # the response nor a refresh is applied, leaving the invitee to appear
+        # only on the next poll (the reported 15 s delay)
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        picker_room = watchtogether.Room(ROOM_JSON)       # snapshot at open
+        self.bridge.room = picker_room
+        self.bridge.room = watchtogether.Room(ROOM_JSON)  # the poll replaced it
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.assertEqual(self.bridge.invite([9], picker_room), [])
+        self.assertIn(9, self.bridge.room.user_ids,
+                      "the invitee must be applied even though the poll "
+                      "replaced the room object")
+        self.assertGreaterEqual(lobby.refreshes, 1)
+
+    def test_refresh_room_repaints_the_open_lobby(self):
+        # the worker assigned self.room without telling the lobby, so a
+        # refreshed room never reached the screen
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.bridge._refresh_room_work(sup)
+        self.assertEqual(lobby.refreshes, 1, "the refreshed room must repaint")
+        self.assertIn(9, self.bridge.room.user_ids)
 
     def test_invite_does_not_apply_another_rooms_response(self):
         # inviting into a room that is not the bridge's current one must not

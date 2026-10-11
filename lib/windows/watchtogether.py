@@ -329,26 +329,40 @@ class WatchTogetherBridge(object):
         self._seen_rooms = current
 
     def refresh_room(self):
-        """Fresh GET /rooms/{id} while the participants dialog is open."""
+        """Fresh GET /rooms/{id} while a dialog is open (participants, invite)."""
         sup = self.supervisor
         if sup is None:
             return
-
-        def work():
-            try:
-                room = self.ensure_api().room(sup.room.id)
-            except Exception as exc:
-                util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
-                    exc.__class__.__name__))
-                return
-            # post-request ownership check: a room switch may have happened
-            # while the REST was in flight
-            if self.supervisor is sup:
-                self.room = room
-
-        thread = threading.Thread(target=work, name="wt-room")
+        thread = threading.Thread(target=self._refresh_room_work, args=(sup,),
+                                  name="wt-room")
         thread.daemon = True
         thread.start()
+
+    def _refresh_room_work(self, sup):
+        """Fetch the room and hand it to on_roster, which repaints any open
+        lobby. Assigning self.room alone left a refreshed roster off-screen
+        until the next roster push."""
+        try:
+            room = self.ensure_api().room(sup.room.id)
+        except Exception as exc:
+            util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
+                exc.__class__.__name__))
+            return
+        # post-request ownership check: a room switch may have happened while
+        # the REST was in flight
+        if self.supervisor is sup:
+            self.on_roster(room)
+
+    def _is_current_room(self, room):
+        """True when `room` is the room we are in.
+
+        Compare ids, not identity: the 15 s roster poll replaces self.room with
+        a fresh Room object, so a picker's snapshot is a different instance by
+        the time its OK is pressed - and an identity check then dropped the
+        invite result entirely."""
+        current = self.room
+        return bool(room is not None and current is not None
+                    and room.id == current.id)
 
     # -- home hub ------------------------------------------------------------
 
@@ -609,7 +623,8 @@ class WatchTogetherBridge(object):
         failure, so AuthError propagates for the caller to report.
 
         Each response is the updated room; the last one is applied through
-        on_roster so an open lobby shows the new members at once."""
+        on_roster so an open lobby shows the new members at once, then confirmed
+        with a GET refresh (which also repaints)."""
         if room is None:
             room = self.room
         if room is None:
@@ -625,11 +640,13 @@ class WatchTogetherBridge(object):
                 raise
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
-        if invited and room is self.room and latest is not None:
-            # the invite response already carries the updated room, so apply it
-            # now: otherwise the new members only appear on the next roster
-            # push, which can take up to the 15 s poll
-            self.on_roster(latest)
+        if invited and self._is_current_room(room):
+            if latest is not None:
+                # the response already carries the updated room: show it now
+                self.on_roster(latest)
+            # confirm with a GET, and repaint again: the poll may have replaced
+            # the room object under us, and the server's view is authoritative
+            self.refresh_room()
         return failed
 
     def invitees(self, room=None):
