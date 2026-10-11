@@ -952,22 +952,44 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.start_playback()
         self.assertEqual(self.player.controls, ["play"])
 
-    def test_invite_refreshes_the_current_room(self):
-        # the invited member must show up in the open lobby
+    def test_invite_applies_the_response_room_at_once(self):
+        # the invite response is the updated room, so applying it here is what
+        # makes the invited member appear in the open lobby immediately instead
+        # of on the next roster push (up to the 15 s poll)
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
         self.bridge.room = watchtogether.Room(ROOM_JSON)
         self.bridge.supervisor = FakeSupervisor()
-        refreshes = []
-        self.bridge.refresh_room = lambda: refreshes.append(True)
-        self.assertEqual(self.bridge.invite([1]), [])
-        self.assertEqual(refreshes, [True])
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.assertEqual(self.bridge.invite([9]), [])
+        self.assertIn(9, self.bridge.room.user_ids,
+                      "the response room replaced the stale one")
+        self.assertEqual(lobby.refreshes, 1, "the open lobby was repainted")
 
-    def test_invite_does_not_refresh_for_another_room(self):
+    def test_invite_does_not_apply_another_rooms_response(self):
+        # inviting into a room that is not the bridge's current one must not
+        # repaint this room's lobby
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
         self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="current"))
         other = watchtogether.Room(dict(ROOM_JSON, id="other"))
-        refreshes = []
-        self.bridge.refresh_room = lambda: refreshes.append(True)
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
         self.assertEqual(self.bridge.invite([1], other), [])
-        self.assertEqual(refreshes, [])
+        self.assertEqual(lobby.refreshes, 0)
 
     def test_cancel_leaves_without_destroying(self):
         self.bridge.room = watchtogether.Room(ROOM_JSON)

@@ -606,23 +606,30 @@ class WatchTogetherBridge(object):
         One request per id: the server's relationship gate (§11.9) rejects the
         whole request when any target is refused, so batching would lose the
         ones that could have been invited. A dead token is not a per-target
-        failure, so AuthError propagates for the caller to report."""
+        failure, so AuthError propagates for the caller to report.
+
+        Each response is the updated room; the last one is applied through
+        on_roster so an open lobby shows the new members at once."""
         if room is None:
             room = self.room
         if room is None:
             return list(user_ids)
         failed = []
         invited = False
+        latest = None
         for user_id in user_ids:
             try:
-                self.ensure_api().invite(room.id, [user_id])
+                latest = self.ensure_api().invite(room.id, [user_id])
                 invited = True
             except watchtogether.AuthError:
                 raise
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
-        if invited and room is self.room:
-            self.refresh_room()     # pull the new members into the open lobby
+        if invited and room is self.room and latest is not None:
+            # the invite response already carries the updated room, so apply it
+            # now: otherwise the new members only appear on the next roster
+            # push, which can take up to the 15 s poll
+            self.on_roster(latest)
         return failed
 
     def invitees(self, room=None):
