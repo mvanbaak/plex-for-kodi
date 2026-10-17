@@ -35,6 +35,7 @@ class WTGateTest(KodiTestCase):
         p.sessionID = "sid"
         p.handler = FakeHandler()
         p.wt_applying_remote = 0.0
+        p.wt_applied_kind = None
         self.fired = []
         p.wt_broadcast = self.fired.append
         return p
@@ -55,19 +56,33 @@ class WTGateTest(KodiTestCase):
         p.onPlayBackSeek(12, 4000)
         self.assertEqual(self.fired, ["seek"])
 
-    def test_armed_deadline_swallows_the_echo(self):
+    def test_armed_deadline_swallows_the_matching_echo(self):
+        # the echo of a change we applied is the same kind we applied
         p = self.bare_player()
-        p.wt_applying_remote = float("inf")     # bridge applied remote state
+        p.wtApplyingRemote("pause")             # bridge applied remote state
         p.onPlayBackPaused()
+        self.assertEqual(self.fired, [])
+        self.assertEqual(p.handler.calls, ["paused"],
+                         "the local handler path still runs")
+
+    def test_a_different_kind_inside_the_window_is_genuine(self):
+        # a real local change landing inside the echo window must not be lost:
+        # suppressing it leaves the room's older State to revert the user
+        p = self.bare_player()
+        p.wtApplyingRemote("pause")
         p.onPlayBackResumed()
+        self.assertEqual(self.fired, ["play"],
+                         "a resume is not the echo of a pause we applied")
+
+    def test_seek_echo_inside_the_window_is_suppressed(self):
+        p = self.bare_player()
+        p.wtApplyingRemote("seek")
         p.onPlayBackSeek(9, -1000)
         self.assertEqual(self.fired, [])
-        self.assertEqual(p.handler.calls, ["paused", "resumed", "seek"],
-                         "the local handler path still runs")
 
     def test_disarmed_deadline_forwards_again(self):
         p = self.bare_player()
-        p.wt_applying_remote = float("inf")
+        p.wtApplyingRemote("pause")
         p.onPlayBackPaused()
         p.wt_applying_remote = 0.0
         p.onPlayBackPaused()

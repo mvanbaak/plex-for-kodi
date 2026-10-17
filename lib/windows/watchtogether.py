@@ -808,19 +808,19 @@ class WatchTogetherBridge(object):
         # States arrive ~1 Hz, so arming on every frame would keep the gate
         # closed and swallow every genuine local event (design §Echo)
         if want_paused is not None and want_paused != is_paused:
-            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.wtApplyingRemote("pause" if want_paused else "play")
             pl.control("pause" if want_paused else "play")
             self._set_tempo(1.0)
             applied = True
         if remote.get("doSeek"):
             # §5.6: a peer's explicit seek command — apply even inside the
             # drift band, where sync_action would stay put
-            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.wtApplyingRemote("seek")
             self._seek_to(remote.get("position", 0.0))
             self._set_tempo(1.0)
             applied = True
         elif action and action[0] == "seek":
-            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.wtApplyingRemote("seek")
             self._seek_to(action[1])
             self._set_tempo(1.0)
             applied = True
@@ -831,7 +831,7 @@ class WatchTogetherBridge(object):
                 # no tempo here: degrade to a hard seek so drift still converges
                 target = remote.get("position", 0.0) + \
                     (0 if remote.get("paused") else session.latency.forward_delay)
-                pl.wt_applying_remote = time.monotonic() + 2.0
+                pl.wtApplyingRemote("seek")
                 self._seek_to(target)
                 applied = True
             # result True: tempo applied; None: player busy, retry next tick

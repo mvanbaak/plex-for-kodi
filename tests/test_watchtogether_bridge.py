@@ -104,7 +104,14 @@ class FakePlayer(object):
         self.handler = FakeHandler()
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+        self.wt_applied_kind = None
         self.pauseAfterPlaybackStarted = False
+
+    def wtApplyingRemote(self, kind):
+        # mirrors PlexPlayer.wtApplyingRemote: arm the echo deadline and record
+        # which kind of change it is the echo of
+        self.wt_applying_remote = float("inf")
+        self.wt_applied_kind = kind
 
     def playVideo(self, video, resume=False):
         self.videos.append((video, resume))
@@ -1260,6 +1267,25 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertEqual(sup.sent[-1]["position"], target,
                          "the applied seek must be published at once")
         self.assertEqual(sup.sent[-1]["doSeek"], False)
+
+    def test_remote_pause_arms_the_pause_echo(self):
+        # only the matching kind is the echo: a resume inside the window is a
+        # real user action and must still reach the bridge
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.remote(self.player.position, paused=True))
+        self.assertEqual(self.player.wt_applied_kind, "pause")
+
+    def test_remote_resume_arms_the_play_echo(self):
+        self.player.paused = True
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.remote(self.player.position, paused=False))
+        self.assertEqual(self.player.wt_applied_kind, "play")
+
+    def test_remote_seek_arms_the_seek_echo(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.handler.dialog = FakeDialog()
+        self.bridge.on_state(self.remote(self.player.position + 10, paused=False))
+        self.assertEqual(self.player.wt_applied_kind, "seek")
 
     def test_remote_resume_applies(self):
         self.player.paused = True

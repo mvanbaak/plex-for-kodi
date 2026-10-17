@@ -2480,6 +2480,8 @@ def consumeStaleTerminal(event):
 
 
 class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
+    # seconds an echo of our own remote apply is expected within (§5.7)
+    WT_ECHO_WINDOW = 2.0
     STATE_STOPPED = "stopped"
     STATE_PLAYING = "playing"
     STATE_PAUSED = "paused"
@@ -2502,6 +2504,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         # Watch Together: bridge callback + monotonic echo-suppression deadline
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+        self.wt_applied_kind = None
         self.handler = AudioPlayerHandler(self)
         self.isExternal = False
 
@@ -3255,14 +3258,25 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             return
         self.handler.onAVStarted()
 
+    def wtApplyingRemote(self, kind):
+        """Arm the echo deadline for a change the bridge just applied, and
+        record its kind (§5.7). Only a local event of that same kind is the
+        echo - see wtBroadcast."""
+        self.wt_applying_remote = time.monotonic() + self.WT_ECHO_WINDOW
+        self.wt_applied_kind = kind
+
     def wtBroadcast(self, kind):
         """Hand a local playback change to the Watch Together bridge.
 
-        Skipped while wt_applying_remote is in the future: that event is the
-        echo of a change the bridge itself just applied (§5.7). The deadline
-        (not a flag) survives Kodi delivering the callback after apply()
-        returns, and self-heals if a genuine local event lands inside it."""
-        if time.monotonic() < self.wt_applying_remote:
+        Suppressed while the echo deadline is in the future AND the event is the
+        echo of the change we just applied, i.e. the same kind wtApplyingRemote
+        was told (§5.7). The deadline alone cannot tell that echo (which lands ms
+        after the apply) from a genuine local change landing later inside the
+        same window, and suppressing a genuine one loses the user's action - the
+        room's older State then reverts it. A different kind inside the window
+        therefore always goes through, which also arms the bridge's hold-off."""
+        if (time.monotonic() < self.wt_applying_remote
+                and kind == self.wt_applied_kind):
             util.DEBUG_LOG('Watch Together - suppressing {} echo'.format(kind))
             return
         if self.wt_broadcast:
