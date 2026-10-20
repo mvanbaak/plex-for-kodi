@@ -14,6 +14,7 @@ from kodi_six import xbmcgui
 from iso639 import languages
 from . import backgroundthread
 from . import kodijsonrpc
+from . import p3i_detector
 from . import colors
 from .windows import seekdialog, windowutils, blackoutdialog
 from . import util
@@ -58,6 +59,7 @@ class VideoStartup(object):
 
     def __init__(self, player):
         self.submitted = False
+        self.detectorToken = None
         with self._lock:
             VideoStartup._current = self
             player._preparingVideoStartup = self
@@ -77,6 +79,8 @@ class VideoStartup(object):
 
     def finish(self):
         with self._lock:
+            token, self.detectorToken = self.detectorToken, None
+            p3i_detector.clear_skip(token)
             if VideoStartup._current is self:
                 util.setGlobalProperty('playback_initializing', '', wait=True)
                 VideoStartup._current = None
@@ -3039,8 +3043,18 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
                 return
             self._videoStartup = startup
             self._preparingVideoStartup = None
-        self.play(url, li)
-        startup.submitted = True
+            # Use the final server decision: Direct Streaming (including copied
+            # video with transcoded audio) shares this flag with Transcoding.
+            # Direct Play stays eligible, even over HTTP or a mapped path.
+            if meta.isTranscoded:
+                startup.detectorToken = p3i_detector.arm_skip()
+            if not startup.current():
+                return
+            self.play(url, li)
+            startup.submitted = True
+            # Kodi captures/consumes the property in Player.play before queuing
+            # the open. Successful submission needs no later global cleanup.
+            startup.detectorToken = None
 
     def playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
         if self.bgmPlaying:
