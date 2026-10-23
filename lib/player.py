@@ -2,6 +2,7 @@ from __future__ import absolute_import
 import base64
 import json
 import threading
+import time
 import six
 import re
 import os
@@ -2502,6 +2503,9 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         # be exactly the bug this counter exists to stop. See BGMPlayerHandler.owns().
         self.bgmLock = threading.RLock()
         self.bgmGeneration = 0
+        # Watch Together: bridge callback + monotonic echo-suppression deadline
+        self.wt_broadcast = None
+        self.wt_applying_remote = 0.0
         self.handler = AudioPlayerHandler(self)
         self.isExternal = False
 
@@ -3265,6 +3269,19 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             return
         self.handler.onAVStarted()
 
+    def wtBroadcast(self, kind):
+        """Hand a local playback change to the Watch Together bridge.
+
+        Skipped while wt_applying_remote is in the future: that event is the
+        echo of a change the bridge itself just applied (§5.7). The deadline
+        (not a flag) survives Kodi delivering the callback after apply()
+        returns, and self-heals if a genuine local event lands inside it."""
+        if time.monotonic() < self.wt_applying_remote:
+            util.DEBUG_LOG('Watch Together - suppressing {} echo'.format(kind))
+            return
+        if self.wt_broadcast:
+            self.wt_broadcast(kind)
+
     def onPlayBackPaused(self):
         if not self.sessionID:
             return
@@ -3272,6 +3289,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         if not self.handler:
             return
         self.handler.onPlayBackPaused()
+        self.wtBroadcast('pause')
 
     def onPlayBackResumed(self):
         if not self.sessionID:
@@ -3279,8 +3297,8 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         util.DEBUG_LOG('Player - RESUMED')
         if not self.handler:
             return
-
         self.handler.onPlayBackResumed()
+        self.wtBroadcast('play')
 
     @consumeStaleTerminal('stop')
     def onPlayBackStopped(self):
@@ -3331,6 +3349,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         if not self.handler:
             return
         self.handler.onPlayBackSeek(time, offset)
+        self.wtBroadcast('seek')
 
     @consumeStaleTerminal('error')
     def onPlayBackError(self):

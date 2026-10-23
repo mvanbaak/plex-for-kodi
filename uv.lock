@@ -248,7 +248,7 @@ wheels = [
 
 [[package]]
 name = "plex-for-kodi"
-version = "1.14.1b1"
+version = "0.0.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

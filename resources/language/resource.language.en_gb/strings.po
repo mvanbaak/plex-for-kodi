@@ -3360,3 +3360,83 @@ msgstr ""
 msgctxt "#35050"
 msgid "Plex is temporarily limiting Watchlist requests. Try again in {} seconds."
 msgstr ""
+
+msgctxt "#35051"
+msgid "Auto-join the last Watch Together room on startup"
+msgstr ""
+
+msgctxt "#35052"
+msgid "Show Watch Together status on the video OSD"
+msgstr ""
+
+msgctxt "#35053"
+msgid "Watch Together"
+msgstr ""
+
+msgctxt "#35054"
+msgid "{} watching"
+msgstr ""
+
+msgctxt "#35055"
+msgid "Reconnecting…"
+msgstr ""
+
+msgctxt "#35056"
+msgid "Leave room"
+msgstr ""
+
+msgctxt "#35057"
+msgid "No active rooms"
+msgstr ""
+
+msgctxt "#35058"
+msgid "New Watch Together room: {}"
+msgstr ""
+
+msgctxt "#35059"
+msgid "The Watch Together room has ended"
+msgstr ""
+
+msgctxt "#35060"
+msgid "You are already watching something else. Join and take over playback?"
+msgstr ""
+
+msgctxt "#35061"
+msgid "Leave the current room and join this one?"
+msgstr ""
+
+msgctxt "#35062"
+msgid "Join"
+msgstr ""
+
+msgctxt "#35063"
+msgid "Remove"
+msgstr ""
+
+msgctxt "#35064"
+msgid "Info"
+msgstr ""
+
+msgctxt "#35065"
+msgid "Remove me from this room?"
+msgstr ""
+
+msgctxt "#35066"
+msgid "Watching"
+msgstr ""
+
+msgctxt "#35067"
+msgid "Participants"
+msgstr ""
+
+msgctxt "#35068"
+msgid "Live"
+msgstr ""
+
+msgctxt "#35069"
+msgid "Close"
+msgstr ""
+
+msgctxt "#35070"
+msgid "Leave this Watch Together room?"
+msgstr ""

@@ -1,22 +1,8 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "plex-for-kodi"
-dynamic = ["version"]
+version = "0.0.0"
 description = "Dev/test environment for the PM4K Kodi add-on. Not published."
 requires-python = ">=3.9"
-
-[tool.hatch.version]
-source = "regex"
-path = "addon.xml"
-pattern = '(?s)<addon\b.*?version="(?P<version>[^"]+)"'
-
-[tool.uv]
-# the add-on is never installed; without this uv would try to build it because
-# of the build-system table above, which only exists to read the dynamic version
-package = false
 
 [dependency-groups]
 dev = ["pytest", "requests", "six", "iso639-lang"]
