@@ -13,7 +13,7 @@ import time
 from kodienv import ENV
 
 ENV.abort_requested = True
-from lib import util, watchtogether  # noqa: E402
+from lib import plexpeople, syncplay, util, watchtogether  # noqa: E402
 from lib.windows import watchtogether as wtwin  # noqa: E402
 from kodi_six import xbmcgui  # noqa: E402
 
@@ -43,6 +43,7 @@ class FakeLatency(object):
 class FakeSession(object):
     latency = FakeLatency()
     remote = {"position": 0.0}
+    roster = {}
 
 
 class FakeSupervisor(object):
@@ -103,6 +104,7 @@ class FakePlayer(object):
         self.handler = FakeHandler()
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+        self.pauseAfterPlaybackStarted = False
 
     def playVideo(self, video, resume=False):
         self.videos.append((video, resume))
@@ -133,6 +135,11 @@ class FakeAPI(object):
         self.rooms_out = rooms if rooms is not None else []
         self.room_out = room
         self.calls = []
+        self.created = []
+        self.leaves = []
+        self.invites = []
+        self.invite_result = None
+        self.invite_fail_ids = set()
 
     def rooms(self):
         self.calls.append("rooms")
@@ -144,6 +151,66 @@ class FakeAPI(object):
 
     def leave(self, room_id):
         self.calls.append(("leave", room_id))
+        self.leaves.append(room_id)
+
+    def create(self, source_uri, title, users=None):
+        self.created.append({"sourceUri": source_uri, "title": title,
+                             "users": users})
+        return watchtogether.Room(self.room_out)
+
+    def invite(self, room_id, user_ids):
+        self.invites.append((room_id, list(user_ids)))
+        if self.invite_result is not None:
+            raise self.invite_result
+        if user_ids and user_ids[0] in self.invite_fail_ids:
+            raise watchtogether.WatchTogetherError("400")
+        return watchtogether.Room(self.room_out)
+
+
+class FakeServer(object):
+    def __init__(self, uuid):
+        self.uuid = uuid
+
+
+class FakeItem(object):
+    """Minimal PlexObject surface the host flow reads: server.uuid, ratingKey,
+    title."""
+
+    def __init__(self, machine="m", rating_key="1", title="T"):
+        self.server = FakeServer(machine) if machine is not None else None
+        self.ratingKey = rating_key
+        self.title = title
+
+
+class FakeLobby(object):
+    def __init__(self):
+        self.closed = False
+
+    def doClose(self):
+        self.closed = True
+
+
+class FakeBusyWindow(object):
+    """Stand-in for busy.BusyWindow: the xbmcgui stub cannot build a real GUI
+    window, but @busy.dialog() only needs create/show/doClose."""
+
+    def show(self):
+        pass
+
+    def doClose(self):
+        pass
+
+    @classmethod
+    def create(cls, show=True, **kwargs):
+        return cls()
+
+
+class FakeRoom(object):
+    """Minimal room surface the lobby dialog reads: participants + title."""
+
+    def __init__(self, users=None, title="Room"):
+        self.participants = users or []
+        self.title = title
 
 
 class BridgeTestCase(KodiTestCase):
@@ -236,6 +303,719 @@ class ReadinessTest(BridgeTestCase):
         self.bridge.supervisor = sup
         self.bridge.on_local_change("pause")
         self.assertIsNone(sup.ready_manual)
+
+
+class LobbyRowsTest(KodiTestCase):
+    """lobby_rows: the lobby's participant list with Ready/Invited status."""
+
+    def room(self, users):
+        return watchtogether.Room({"users": users})
+
+    def test_lobby_rows_marks_ready_and_invited(self):
+        room = self.room([{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
+        roster = {syncplay.build_identity("d", "n", 1): {"isReady": True}}
+        rows = wtwin.lobby_rows(room, roster)
+        self.assertEqual([r["status"] for r in rows], ["Ready", "Invited"])
+        self.assertEqual([r["title"] for r in rows], ["A", "B"])
+
+    def test_lobby_rows_falls_back_to_username_and_thumb(self):
+        room = self.room([{"id": 1, "username": "u1", "thumb": "/t.png"}])
+        rows = wtwin.lobby_rows(room, {})
+        self.assertEqual(rows, [{"title": "u1", "thumb": "/t.png",
+                                 "status": "Invited"}])
+
+
+class LobbyDialogTest(KodiTestCase):
+    """LobbyDialog: host mode offers Start/Cancel/Invite; guest is read-only."""
+
+    def test_lobby_dialog_read_only_hides_start(self):
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                              host=False)
+        self.assertIs(d.is_host, False)   # dialog hides Start/Cancel in guest mode
+
+    def test_lobby_dialog_host_mode(self):
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                              host=True)
+        self.assertIs(d.is_host, True)
+
+    def test_lobby_back_cancels_for_the_host(self):
+        calls = []
+        saved = wtwin.bridge.cancel_hosting
+        wtwin.bridge.cancel_hosting = lambda: calls.append("cancel")
+        try:
+            d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                                  host=True)
+            d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
+        finally:
+            wtwin.bridge.cancel_hosting = saved
+        self.assertEqual(calls, ["cancel"])
+
+    def test_lobby_back_leaves_for_a_guest(self):
+        calls = []
+        saved = wtwin.bridge.leave
+        wtwin.bridge.leave = lambda: calls.append("leave")
+        try:
+            d = wtwin.LobbyDialog(room=FakeRoom(users=[]), roster={},
+                                  host=False)
+            d.onAction(wtwin.xbmcgui.ACTION_NAV_BACK)
+        finally:
+            wtwin.bridge.leave = saved
+        self.assertEqual(calls, ["leave"])
+
+    def test_lobby_dialog_syncs_title_and_status_rows(self):
+        room = FakeRoom(users=[{"id": 1, "title": "A"}, {"id": 2, "title": "B"}])
+
+        class FakeList(object):
+            def __init__(self):
+                self.items = []
+
+            def reset(self):
+                self.items = []
+
+            def addItems(self, items):
+                self.items += items
+
+        d = wtwin.LobbyDialog(room=room, roster={}, host=True)
+        d.peopleList = FakeList()
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
+        self.assertEqual([i.label2 for i in d.peopleList.items],
+                         ["Invited", "Invited"])
+
+    def test_refresh_tracks_bridge_room_membership(self):
+        # the 15 s roster poll replaces bridge.room with a fresh Room; the open
+        # lobby must re-read it or an invitee never appears (their Invited
+        # status would be unreachable)
+        class FakeList(object):
+            def __init__(self):
+                self.items = []
+
+            def reset(self):
+                self.items = []
+
+            def addItems(self, items):
+                self.items += items
+
+        saved_room = wtwin.bridge.room
+        saved_sup = wtwin.bridge.supervisor
+        try:
+            wtwin.bridge.supervisor = None
+            wtwin.bridge.room = watchtogether.Room(
+                {"id": "r", "users": [{"id": 1, "title": "A"}]})
+            d = wtwin.LobbyDialog(room=watchtogether.Room({"id": "r", "users": []}),
+                                  roster={}, host=True)
+            d.peopleList = FakeList()
+            wtwin.bridge.room = watchtogether.Room(
+                {"id": "r", "users": [{"id": 1, "title": "A"},
+                                      {"id": 2, "title": "B"}]})
+            d.refresh()
+        finally:
+            wtwin.bridge.room = saved_room
+            wtwin.bridge.supervisor = saved_sup
+        self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
+
+
+class InviteRowsTest(KodiTestCase):
+    """invite_rows: the invite picker's list-item properties."""
+
+    def test_invite_dialog_marks_access_unknown(self):
+        rows = wtwin.invite_rows([
+            plexpeople.Invitee(1, "a", "", False),
+            plexpeople.Invitee(2, "b", "", True),
+        ])
+        self.assertEqual(rows[1]["access_unknown"], "1")
+
+    def test_invite_rows_carry_id_title_and_thumb(self):
+        rows = wtwin.invite_rows([plexpeople.Invitee(7, "b", "/t.png", False)])
+        self.assertEqual(rows, [{"id": 7, "title": "b", "thumb": "/t.png",
+                                 "access_unknown": ""}])
+
+
+class InviteDialogTest(KodiTestCase):
+    """InviteDialog: multi-select list; OK invites the selected ids."""
+
+    class FakeList(object):
+        def __init__(self):
+            self.items = []
+
+        def reset(self):
+            self.items = []
+
+        def addItems(self, items):
+            self.items += items
+
+    def setUp(self):
+        super(InviteDialogTest, self).setUp()
+        # @busy.dialog() cannot build a real window under the xbmcgui stub
+        self._saved_busy_window = wtwin.busy.BusyWindow
+        wtwin.busy.BusyWindow = FakeBusyWindow
+
+    def tearDown(self):
+        wtwin.busy.BusyWindow = self._saved_busy_window
+        super(InviteDialogTest, self).tearDown()
+
+    def dialog(self, room=None):
+        d = wtwin.InviteDialog(room=room)
+        d.peopleList = self.FakeList()
+        return d
+
+    def test_invite_dialog_syncs_rows_and_collects_selection(self):
+        d = self.dialog()
+        d._invitees = [plexpeople.Invitee(1, "a", "", False),
+                       plexpeople.Invitee(2, "b", "", True)]
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items], ["a", "b"])
+        self.assertEqual(d._selected_ids(), [])
+        d.peopleList.items[1].setProperty("selected", "1")
+        self.assertEqual(d._selected_ids(), [2])
+
+    def test_fetch_degrades_when_invitees_raises(self):
+        # a people lookup failure must not break the picker
+        saved = wtwin.bridge.invitees
+        synced = []
+
+        def boom(*a, **k):
+            raise ValueError("people lookup failed")
+
+        wtwin.bridge.invitees = boom
+        try:
+            d = self.dialog()
+            d._sync = lambda: synced.append(True)
+            d._fetch()
+        finally:
+            wtwin.bridge.invitees = saved
+        self.assertEqual(d._invitees, [])
+        self.assertEqual(synced, [True])
+
+    def test_fetch_uses_the_dialog_room(self):
+        # a picker opened from a room tile must query that tile's room, not
+        # whatever room the bridge happens to be in
+        room = watchtogether.Room({"id": "other", "sourceUri": "", "users": []})
+        saved = wtwin.bridge.invitees
+        seen = []
+        wtwin.bridge.invitees = lambda r=None: seen.append(r) or []
+        try:
+            d = self.dialog(room=room)
+            d._fetch()
+        finally:
+            wtwin.bridge.invitees = saved
+        self.assertEqual(seen, [room])
+
+    def test_send_invites_into_the_dialog_room(self):
+        room = watchtogether.Room({"id": "other", "sourceUri": "", "users": []})
+        saved = wtwin.bridge.invite
+        calls = []
+        wtwin.bridge.invite = lambda ids, r=None: calls.append((ids, r)) or []
+        try:
+            d = self.dialog(room=room)
+            d._send([1, 2])
+        finally:
+            wtwin.bridge.invite = saved
+        self.assertEqual(calls, [([1, 2], room)])
+
+    def test_send_toasts_sign_in_on_auth_error(self):
+        saved = wtwin.bridge.invite
+        saved_notify = wtwin.util.showNotification
+        toasts = []
+        wtwin.util.showNotification = toasts.append
+        wtwin.bridge.invite = lambda ids, r=None: (_ for _ in ()).throw(
+            watchtogether.AuthError("POST /rooms/x/invite -> 401"))
+        try:
+            self.dialog()._send([1])
+        finally:
+            wtwin.bridge.invite = saved
+            wtwin.util.showNotification = saved_notify
+        self.assertEqual(toasts, [util.T(35083,
+                                        "Sign in again to use Watch Together")])
+
+
+class InviteeSourceTest(BridgeTestCase):
+    """bridge.invitees: eligible invitees, home-only when friends are empty."""
+
+    def test_invitees_fall_back_to_home_users_when_friends_empty(self):
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 5, "title": "Home", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: []
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual([i.id for i in out], [5])
+        self.assertEqual(out[0].title, "Home")
+
+    def test_home_user_title_falls_back_to_username(self):
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 5, "title": "", "username": "alice", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: []
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual(out[0].title, "alice")
+
+    def test_invitees_excludes_self(self):
+        # self must never be offered as an invitee (invite self is a 400)
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = [{"id": 9, "title": "Me", "thumb": ""}]
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: [
+            {"id": 9, "title": "Me", "thumb": ""},
+            {"id": 5, "title": "Friend", "thumb": ""}]
+        try:
+            self.bridge.room = watchtogether.Room(dict(
+                ROOM_JSON, sourceUri="server://m/com.plexapp.plugins.library/"
+                                     "library/metadata/1"))
+            out = self.bridge.invitees()
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        self.assertEqual([i.id for i in out], [5])
+
+    def test_invitees_uses_an_explicit_room(self):
+        saved_account = wtwin.plexapp.ACCOUNT
+        saved_friends = wtwin.plexpeople.friends
+
+        class Account(object):
+            authToken = "tok"
+            ID = 9
+            homeUsers = []
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.plexpeople.friends = lambda *a, **k: [
+            {"id": 1, "title": "a", "thumb": ""},
+            {"id": 2, "title": "b", "thumb": ""}]
+        self.bridge.room = watchtogether.Room(dict(
+            ROOM_JSON, users=[{"id": 1, "title": "a"}]))
+        other = watchtogether.Room(dict(
+            ROOM_JSON, users=[{"id": 2, "title": "b"}]))
+        try:
+            out = self.bridge.invitees(other)
+        finally:
+            wtwin.plexapp.ACCOUNT = saved_account
+            wtwin.plexpeople.friends = saved_friends
+        # the passed room's members are excluded, not the current room's
+        self.assertEqual([i.id for i in out], [1])
+
+
+class AutoStartTest(BridgeTestCase):
+    """_maybe_auto_start / _on_ready / start_playback: §6.4 readiness gate."""
+
+    def setUp(self):
+        super(AutoStartTest, self).setUp()
+        # auto-start is the host's job: only a host drives start_playback
+        self.bridge._hosting = True
+
+    def room(self, user_ids):
+        return watchtogether.Room({"users": [{"id": i, "title": str(i)}
+                                             for i in user_ids]})
+
+    def fire_ready(self, roster):
+        """A peer's Set{ready} reached the bridge (Session wrote the roster)."""
+        self.bridge.supervisor.session.roster = roster
+        self.bridge._on_ready(None, None)
+
+    def test_start_playback_unpauses_and_broadcasts(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_auto_start_when_all_members_ready(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1, 2])
+        self.bridge._player_ready = True
+        self.fire_ready({
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": True}})
+        self.assertIn("play", self.player.controls)
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_auto_start_holds_when_a_member_missing(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1, 2])
+        self.bridge._player_ready = True
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+        self.assertEqual(getattr(self.bridge.supervisor, "sent_now", 0), 0)
+
+    def test_auto_start_holds_until_self_is_ready(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1])
+        self.bridge._player_ready = False
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+
+    def test_auto_start_runs_only_once(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1])
+        self.bridge._player_ready = True
+        roster = {syncplay.build_identity("d", "n", 1): {"isReady": True}}
+        self.fire_ready(roster)
+        self.fire_ready(roster)
+        self.assertEqual(self.player.controls, ["play"])
+        self.assertEqual(self.bridge.supervisor.sent_now, 1)
+
+    def test_ready_refreshes_the_open_lobby(self):
+        class FakeLobby(object):
+            refreshed = 0
+
+            def refresh(self):
+                self.refreshed += 1
+
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.fire_ready({})
+        self.assertEqual(lobby.refreshed, 1)
+
+    def test_auto_start_does_not_fire_for_a_guest(self):
+        # a ready guest must never call start_playback() on the room
+        self.bridge._hosting = False
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = self.room([1])
+        self.bridge._player_ready = True
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+        self.assertEqual(getattr(self.bridge.supervisor, "sent_now", 0), 0)
+
+
+class HostFlowTest(BridgeTestCase):
+    """host / invite / start / cancel — the host capability (§Flows/Host)."""
+
+    def setUp(self):
+        super(HostFlowTest, self).setUp()
+        self.api = FakeAPI()
+        self.bridge.api = self.api
+        self.joined = []
+        self.opened = []
+        self.lobby_opens = []
+        self.start_on_lobby = False       # a test sets True to simulate Start
+        # host() joins via the real (network/socket) join and opens the real
+        # video window; both are stubbed here to keep the test offline.
+        self.bridge.join = self._fake_join
+        self.bridge._play_item = self.opened.append
+        self.bridge._open_lobby = self._fake_lobby
+        # @busy.dialog() around the create/join portion cannot build a real
+        # window under the xbmcgui stub
+        self._saved_busy_window = wtwin.busy.BusyWindow
+        wtwin.busy.BusyWindow = FakeBusyWindow
+
+    def tearDown(self):
+        wtwin.busy.BusyWindow = self._saved_busy_window
+        super(HostFlowTest, self).tearDown()
+
+    def _fake_lobby(self, host=True):
+        # _open_lobby is modal (blocks until Start/Cancel/ESC); stubbed so the
+        # test does not need a real window
+        self.lobby_opens.append(host)
+        if self.start_on_lobby:
+            self.bridge._started = True
+
+    def _fake_join(self, room_id, hosting=False):
+        if self.bridge.supervisor is not None:
+            return self.bridge.supervisor   # mirrors join()'s early return
+        self.joined.append(room_id)
+        self.bridge._hosting = hosting
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+
+    def test_host_creates_room_with_item_source_uri(self):
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(len(self.api.created), 1)
+        created = self.api.created[0]
+        self.assertEqual(
+            created["sourceUri"],
+            "server://m/com.plexapp.plugins.library/library/metadata/1")
+        self.assertEqual(created["title"], "T")
+
+    def test_host_shows_the_lobby_before_the_video(self):
+        # the lobby runs over Home; the video opens only once the room starts
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(self.lobby_opens, [True])
+        self.assertEqual(self.opened, [], "no video until the room starts")
+        self.assertTrue(self.bridge._player_ready,
+                        "the host is ready while waiting in the lobby")
+
+    def test_host_opens_the_video_when_the_room_starts(self):
+        self.start_on_lobby = True
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(len(self.opened), 1, "Start opens the video")
+
+    def test_host_joins_the_created_room(self):
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(self.joined, ["ca8cfezmke4"])
+
+    def test_host_leaves_the_current_room_first(self):
+        # hosting while already joined must switch, not orphan: join()
+        # early-returns an existing supervisor, leaving self.room stale
+        self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="oldroom0001"))
+        old_sup = FakeSupervisor()
+        self.bridge.supervisor = old_sup
+
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+
+        self.assertEqual(self.api.leaves, ["oldroom0001"],
+                         "must leave the current room (DELETE) before joining")
+        self.assertTrue(old_sup.stopped)
+        self.assertEqual(self.joined, ["ca8cfezmke4"],
+                         "must actually join the new room, not no-op")
+        self.assertEqual(self.bridge.room.id, "ca8cfezmke4")
+
+    def test_host_skips_without_a_rating_key(self):
+        self.bridge.host(FakeItem(machine="m", rating_key=None, title="T"))
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.joined, [])
+        self.assertEqual(self.opened, [])
+
+    def test_host_skips_without_a_server_uuid(self):
+        # no machine -> an unresolvable sourceUri; do not create a dead room
+        self.bridge.host(FakeItem(machine=None, rating_key="1", title="T"))
+        self.assertEqual(self.api.created, [])
+        self.assertEqual(self.joined, [])
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.toasts,
+                         [util.T(35084, "This item cannot be hosted")])
+
+    def test_host_leaves_the_created_room_when_join_fails(self):
+        # create succeeded but the follow-up join failed: DELETE the orphan
+        # and report, instead of leaving a room nobody is in
+        def boom(room_id, hosting=False):
+            raise watchtogether.RoomGone("gone")
+        self.bridge.join = boom
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(self.api.leaves, ["ca8cfezmke4"],
+                         "the created room must be left, not orphaned")
+        self.assertEqual(self.opened, [], "no playback after a failed join")
+        self.assertIsNone(self.bridge.lobby)
+
+    def test_host_dead_token_asks_to_sign_in(self):
+        class DeadTokenAPI(FakeAPI):
+            def create(self, source_uri, title, users=None):
+                raise watchtogether.AuthError("POST /rooms -> 401")
+        self.bridge.api = DeadTokenAPI()
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertEqual(self.toasts,
+                         [util.T(35083, "Sign in again to use Watch Together")])
+        self.assertEqual(self.opened, [])
+
+    def test_host_sets_the_people_client_id(self):
+        from lib import plex, plexpeople
+        saved = plexpeople.CLIENT_ID
+        plexpeople.CLIENT_ID = ""
+        try:
+            self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+            self.assertEqual(plexpeople.CLIENT_ID, plex.CLIENT_ID)
+            self.assertTrue(plexpeople.VERSION)
+        finally:
+            plexpeople.CLIENT_ID = saved
+
+    def test_invite_reports_failed_targets(self):
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.api.invite_result = watchtogether.WatchTogetherError("400")
+        self.assertEqual(self.bridge.invite([1]), [1])
+
+    def test_invite_keeps_the_room_and_invites_the_rest(self):
+        # §11.9: a refused target must not block the others
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.api.invite_fail_ids = {1}
+        self.assertEqual(self.bridge.invite([1, 2]), [1])
+        self.assertEqual(self.api.invites,
+                         [("ca8cfezmke4", [1]), ("ca8cfezmke4", [2])],
+                         "both ids attempted: the loop must not abort on the "
+                         "first failure")
+
+    def test_invite_without_a_room_fails_every_id(self):
+        self.assertEqual(self.bridge.invite([1, 2]), [1, 2])
+
+    def test_invite_targets_an_explicit_room(self):
+        # a picker opened from a room tile must invite into that room, not
+        # whatever room the bridge is currently in
+        self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="current"))
+        other = watchtogether.Room(dict(ROOM_JSON, id="other"))
+        self.assertEqual(self.bridge.invite([1], other), [])
+        self.assertEqual(self.api.invites, [("other", [1])])
+
+    def test_start_unpauses(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+
+    def test_start_playback_is_idempotent(self):
+        # auto-start can race on two threads; the second call must be a no-op
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.start_playback()
+        self.bridge.start_playback()
+        self.assertEqual(self.player.controls, ["play"])
+
+    def test_invite_refreshes_the_current_room(self):
+        # the invited member must show up in the open lobby
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+        refreshes = []
+        self.bridge.refresh_room = lambda: refreshes.append(True)
+        self.assertEqual(self.bridge.invite([1]), [])
+        self.assertEqual(refreshes, [True])
+
+    def test_invite_does_not_refresh_for_another_room(self):
+        self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="current"))
+        other = watchtogether.Room(dict(ROOM_JSON, id="other"))
+        refreshes = []
+        self.bridge.refresh_room = lambda: refreshes.append(True)
+        self.assertEqual(self.bridge.invite([1], other), [])
+        self.assertEqual(refreshes, [])
+
+    def test_cancel_leaves_without_destroying(self):
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+
+        self.bridge.cancel_hosting()
+
+        self.assertEqual(self.api.leaves, ["ca8cfezmke4"])
+        self.assertEqual(self.api.calls, [("leave", "ca8cfezmke4")],
+                         "cancel must DELETE (leave), never destroy")
+        self.assertTrue(lobby.closed)
+        self.assertIsNone(self.bridge.lobby)
+
+    def test_guest_lobby_is_not_opened_for_the_host(self):
+        # a relay State arriving during join() must not open the guest lobby
+        self.bridge._hosting = True
+        opened = []
+        self.bridge._open_lobby = lambda *a, **k: opened.append(True)
+        self.bridge._update_guest_lobby({"paused": True, "position": 0.0})
+        self.assertEqual(opened, [])
+
+    def test_host_sets_the_hosting_state(self):
+        self.bridge._open_lobby = lambda *a, **k: None
+        self.bridge.host(FakeItem(machine="m", rating_key="1", title="T"))
+        self.assertTrue(self.bridge._hosting)
+
+    def test_open_lobby_shows_modally(self):
+        # the dialog must be shown modally (main thread); setUp's stub bypasses
+        # _open_lobby, so restore the real method here
+        self.bridge.__dict__.pop("_open_lobby", None)
+        made = []
+
+        class FakeDialog(object):
+            def __init__(self):
+                self.modalled = False
+                self.props = {}
+
+            def setBoolProperty(self, key, value):
+                self.props[key] = value
+
+            def setProperty(self, key, value):
+                self.props[key] = value
+
+            def modal(self):
+                self.modalled = True
+
+        class FakeLobbyDialog(object):
+            @staticmethod
+            def create(**kwargs):
+                d = FakeDialog()
+                made.append(d)
+                return d
+
+        saved = wtwin.LobbyDialog
+        wtwin.LobbyDialog = FakeLobbyDialog
+        try:
+            self.bridge._open_lobby(host=True)
+        finally:
+            wtwin.LobbyDialog = saved
+        self.assertTrue(made[0].modalled, "the lobby must be opened modally")
+        self.assertIsNone(self.bridge.lobby, "cleared once the lobby closes")
+
+
+class GuestLobbyTest(BridgeTestCase):
+    """The read-only lobby a guest sees while a joined room is unstarted.
+
+    Heuristic (§Guest lobby visibility): relay State paused with position < 1 s
+    means the room has not started; the lobby closes on the first state with
+    playback running."""
+
+    def setUp(self):
+        super(GuestLobbyTest, self).setUp()
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        # the dialog itself is covered by LobbyDialogTest; here we test the
+        # guest-lobby heuristic, so stub the open (a real create()+_onInit
+        # needs a Kodi window)
+        def open_lobby(host=True):
+            lobby = FakeLobby()
+            lobby.is_host = host
+            self.bridge.lobby = lobby
+        self.bridge._open_lobby = open_lobby
+
+    def state(self, position, paused):
+        return {"position": position, "paused": paused, "doSeek": False,
+                "setBy": "other-identity"}
+
+    def set_remote(self, position, paused):
+        self.bridge.supervisor.session.remote = self.state(position, paused)
+
+    def test_room_unstarted_for_paused_at_zero(self):
+        self.set_remote(0.0, True)
+        self.assertTrue(self.bridge._room_unstarted())
+
+    def test_room_started_when_playing(self):
+        self.set_remote(120.0, False)
+        self.assertFalse(self.bridge._room_unstarted())
+
+    def test_room_started_when_no_state_yet(self):
+        # no relay State yet: do not block the join waiting for a lobby
+        self.bridge.supervisor = None
+        self.assertFalse(self.bridge._room_unstarted())
+
+    def test_guest_closes_lobby_when_playback_starts(self):
+        self.set_remote(0.0, True)
+        self.bridge._open_lobby(host=False)
+        self.assertIsNotNone(self.bridge.lobby)
+        self.bridge.on_state(self.state(1.5, False))
+        self.assertIsNone(self.bridge.lobby, "playback started: close the lobby")
+
+    def test_guest_lobby_is_not_closed_for_the_host(self):
+        # _update_guest_lobby is a no-op while hosting
+        self.bridge._hosting = True
+        self.bridge.lobby = FakeLobby()
+        self.bridge.on_state(self.state(1.5, False))
+        self.assertIsNotNone(self.bridge.lobby)
+
+    def test_guest_lobby_closes_when_the_room_goes_away(self):
+        self.set_remote(0.0, True)
+        self.bridge._open_lobby(host=False)
+        self.assertIsNotNone(self.bridge.lobby)
+        self.bridge.on_gone()
+        self.assertIsNone(self.bridge.lobby, "room ended: no orphan lobby")
 
 
 class RemoteApplyTest(BridgeTestCase):
