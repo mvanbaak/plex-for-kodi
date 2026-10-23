@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plex-for-kodi"
+dynamic = ["version"]
+description = "Dev/test environment for the PM4K Kodi add-on. Not published."
+requires-python = ">=3.9"
+
+[tool.hatch.version]
+source = "regex"
+path = "addon.xml"
+pattern = '(?s)<addon\b.*?version="(?P<version>[^"]+)"'
+
+[tool.uv]
+# the add-on is never installed; without this uv would try to build it because
+# of the build-system table above, which only exists to read the dynamic version
+package = false
+
+[dependency-groups]
+dev = ["pytest", "requests", "six", "iso639-lang"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = "*Test"
+python_functions = "test_*"
+# An unclosed xbmcvfs.File surfaces as a ResourceWarning, and on a Kodi box that
+# is a leaked VFS handle. Keep them visible - but note they cannot be promoted to
+# errors: the warning fires during garbage collection, outside any test's
+# context, so pytest cannot attribute it to a test. The enforcing check is
+# test_vfs_handles.py, which reads the source instead.
+filterwarnings = ["always::ResourceWarning"]
