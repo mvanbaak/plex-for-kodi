@@ -333,6 +333,17 @@ class RoomInfoRowsTest(KodiTestCase):
             ROOM, users=[{"id": 1, "username": "u", "thumb": "http://a"}]))
         self.assertEqual(wtwin.room_info_rows(room, set())[0]["thumb"], "http://a")
 
+    def test_state_for_shows_status_labels(self):
+        rows = wtwin.room_info_rows(self.room(), {"1"},
+                                    state_for=lambda uid: (False, False))
+        self.assertEqual(rows[0]["sub"], util.T(35090, "Watching"))
+        self.assertEqual(rows[1]["sub"], util.T(35076, "Invited"))
+
+    def test_state_for_stale_live_user_is_buffering(self):
+        rows = wtwin.room_info_rows(self.room(), {"1"},
+                                    state_for=lambda uid: (True, False))
+        self.assertEqual(rows[0]["sub"], util.T(35091, "Buffering"))
+
 
 class _LeaveAPI(object):
     def __init__(self):
@@ -383,3 +394,41 @@ class LiveUserIdsTest(KodiTestCase):
 
     def test_no_supervisor_is_empty(self):
         self.assertEqual(wtwin.WatchTogetherBridge()._live_user_ids(), set())
+
+    def test_identity_without_user_id_is_not_live(self):
+        # a roster identity with no userID must be skipped, not read as "None"
+        bridge = wtwin.WatchTogetherBridge()
+        roster = {
+            json.dumps({"deviceIdentifier": "d", "deviceName": "K"}): {},
+            json.dumps({"deviceIdentifier": "e", "deviceName": "K",
+                        "userID": "1000002"}): {},
+        }
+        bridge.supervisor = type("Sup", (), {"session": type("S", (), {"roster": roster})()})()
+        self.assertEqual(bridge._live_user_ids(), {"1000002"})
+
+
+class IdentityHelperTest(KodiTestCase):
+    def test_identity_user_id(self):
+        key = json.dumps({"deviceIdentifier": "d", "deviceName": "Kodi",
+                          "userID": "1000001"})
+        self.assertEqual(wtwin.identity_user_id(key), "1000001")
+
+    def test_identity_device_name(self):
+        key = json.dumps({"deviceIdentifier": "d", "deviceName": "Kodi",
+                          "userID": "1000001"})
+        self.assertEqual(wtwin.identity_device_name(key), "Kodi")
+
+    def test_identity_user_id_strips_collision_underscores(self):
+        key = json.dumps({"deviceIdentifier": "d", "deviceName": "Kodi",
+                          "userID": "1000002"}) + "__"
+        self.assertEqual(wtwin.identity_user_id(key), "1000002")
+
+    def test_identity_helpers_reject_garbage_and_none(self):
+        self.assertIsNone(wtwin.identity_user_id("not-json"))
+        self.assertIsNone(wtwin.identity_device_name("not-json"))
+        self.assertIsNone(wtwin.identity_user_id(None))
+        self.assertIsNone(wtwin.identity_device_name(None))
+
+    def test_identity_user_id_absent_is_none(self):
+        key = json.dumps({"deviceIdentifier": "d", "deviceName": "Kodi"})
+        self.assertIsNone(wtwin.identity_user_id(key))

@@ -1448,6 +1448,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
             xbmc.executebuiltin('PlayerControl(Repeat)')
 
     def watchTogetherMenu(self):
+        # lazy: windows.watchtogether imports player, which imports this module
         from . import watchtogether as wtwin
         # above the WT button: one slot right of the subtitle button, plus the
         # VS10 button when it is shown

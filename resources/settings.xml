@@ -128,6 +128,11 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <setting id="watchtogether.pause_catchup" type="boolean" label="35089">
+                    <level>0</level>
+                    <default>false</default>
+                    <control type="toggle"/>
+                </setting>
             </group>
         </category>
         <!-- Player -->

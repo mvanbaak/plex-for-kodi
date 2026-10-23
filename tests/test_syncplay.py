@@ -207,6 +207,31 @@ class SyncActionTest(unittest.TestCase):
                                                forward_delay=3.0),
                           "paused target must ignore forward_delay")
 
+    def test_default_threshold_still_seeks_at_4(self):
+        # guards the default: 4.0 still seeks when seek_ahead is omitted
+        self.assertEqual(syncplay.sync_action(104.0, 100.0, True, 0.0),
+                         ("seek", 100.0))
+        self.assertEqual(syncplay.sync_action(104.0, 100.0, True, 0.0,
+                                              seek_ahead=10.0),
+                         ("tempo", 0.95),
+                         "default is 4.0, not SEEK_BEHIND")
+
+    def test_widened_threshold_tempers_instead_of_seeking(self):
+        self.assertEqual(syncplay.sync_action(105.0, 100.0, True, 0.0,
+                                              seek_ahead=10.0),
+                         ("tempo", 0.95))
+
+    def test_widened_threshold_still_seeks_at_10(self):
+        self.assertEqual(syncplay.sync_action(110.0, 100.0, True, 0.0,
+                                              seek_ahead=10.0),
+                         ("seek", 100.0))
+
+    def test_widened_threshold_keeps_behind_bound(self):
+        self.assertEqual(syncplay.sync_action(98.25, 100.0, True, 0.0,
+                                              seek_ahead=10.0),
+                         ("seek", 100.0),
+                         "seek_ahead must not move the -1.75 behind bound")
+
 class SessionTest(unittest.TestCase):
     def make(self):
         ident = syncplay.build_identity("dev-a", "Kodi", 1000001)
@@ -385,6 +410,16 @@ class SessionTest(unittest.TestCase):
         sess.roster[ident] = {"isReady": True}
         sess.on_message({"Set": {"user": {ident: {
             "room": {"name": "ca8cfezmke4"}, "event": {"left": True}}}}})
+        self.assertEqual(self.events, [])
+        self.assertIn(ident, sess.roster)
+
+    def test_own_join_event_is_advisory_not_a_join(self):
+        # §5.8: the relay echoes our own join too — it must not fire on_event,
+        # or a self-join would toast "you joined the room"
+        sess, ident = self.make()
+        sess.roster[ident] = {"isReady": True}
+        sess.on_message({"Set": {"user": {ident: {
+            "room": {"name": "ca8cfezmke4"}, "event": {"joined": True}}}}})
         self.assertEqual(self.events, [])
         self.assertIn(ident, sess.roster)
 

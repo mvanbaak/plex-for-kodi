@@ -11,7 +11,11 @@ from __future__ import absolute_import
 
 import collections
 import threading
+import time
+
 import requests
+
+from . import syncplay
 
 BASE = "https://together.plex.tv"
 
@@ -61,8 +65,7 @@ class Room(object):
         return list(seen.values())
 
     def ended(self, now=None):
-        import time as _time
-        return (now if now is not None else _time.time()) >= self.ends_at
+        return (now if now is not None else time.time()) >= self.ends_at
 
 
 def _http_request(method, path, body=None, token=None):
@@ -161,14 +164,11 @@ SYNC_HOLD = 10.0  # hold outbound States until synced (well under the 13s reap)
 class SessionSupervisor(object):
     def __init__(self, room, identity, token, ws_factory, transport=None,
                  clock=None, abort=None, log=None):
-        from . import syncplay
         self.room = room
         self.identity = identity
         self.api = RoomsApi(token, transport=transport)
         self.ws_factory = ws_factory
         if clock is None:
-            import time
-
             class _Clock(object):
                 def time(self):
                     return time.time()
@@ -274,7 +274,6 @@ class SessionSupervisor(object):
         ready = bool(ready)
         if not manually and ready == self._ready_sent:
             return
-        from . import syncplay
         self._ready = ready
         self._ready_sent = ready
         self._send(syncplay.set_ready(ready, manually_initiated=manually))
@@ -374,7 +373,6 @@ class SessionSupervisor(object):
             self._opened_at = state["opened_at"]
             self._synced = False
             self.connected = True
-            from . import syncplay
             self._send(syncplay.hello(self.room.id, self.identity))
             self._send(syncplay.list_request())
             # §5.8/§6.4: state is per-connection — re-announce readiness and
@@ -397,7 +395,6 @@ class SessionSupervisor(object):
             self.connected = False
             self._stop_heartbeat()
 
-        from . import syncplay
         with self._inbox_lock:
             self._inbox.clear()
         self._inbox_event.clear()

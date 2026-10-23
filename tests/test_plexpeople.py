@@ -169,6 +169,46 @@ def test_http_never_raises_on_a_failed_request():
     assert body == b""
 
 
+def test_http_passes_a_timeout(monkeypatch):
+    # A dead host must fail inside REQUEST_TIMEOUT, not block forever: the
+    # invite picker calls this from a worker thread, and a no-timeout urlopen
+    # left `wt-invitees` alive indefinitely (empty picker + hung shutdown).
+    seen = {}
+
+    class Resp(object):
+        headers = {"Content-Type": "application/json"}
+
+        def getcode(self):
+            return 200
+
+        def read(self):
+            return b"{}"
+
+        def close(self):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        seen["timeout"] = timeout
+        return Resp()
+
+    monkeypatch.setattr(plexpeople, "urlopen", fake_urlopen)
+    status, _ct, body = plexpeople._http("GET", "https://example.invalid/x", {})
+    assert status == 200 and body == b"{}"
+    assert seen["timeout"] == plexpeople.REQUEST_TIMEOUT
+
+
+def test_http_degrades_when_the_connection_times_out(monkeypatch):
+    # the timeout surfaces as socket.timeout (an OSError); it must degrade to
+    # status 0 so eligible_invitees falls back to home users
+    import socket
+
+    def fake_urlopen(req, timeout=None):
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(plexpeople, "urlopen", fake_urlopen)
+    assert plexpeople._http("GET", "https://example.invalid/x", {}) == (0, "", b"")
+
+
 def test_friends_str_body_degrades():
     # an injected http returning str (not bytes) must not raise
     out = plexpeople.friends("tok", http=lambda *a, **k: (200, "application/json", "[]"))

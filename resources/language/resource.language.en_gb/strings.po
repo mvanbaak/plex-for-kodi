@@ -3437,14 +3437,6 @@ msgctxt "#35069"
 msgid "Close"
 msgstr ""
 
-msgctxt "#35070"
-msgid "Leave this Watch Together room?"
-msgstr ""
-
-msgctxt "#35071"
-msgid "Invite"
-msgstr ""
-
 msgctxt "#35072"
 msgid "Start"
 msgstr ""
@@ -3499,4 +3491,52 @@ msgstr ""
 
 msgctxt "#35085"
 msgid "Invite (+)"
+msgstr ""
+
+msgctxt "#35086"
+msgid "Leave this Watch Together room?"
+msgstr ""
+
+msgctxt "#35087"
+msgid "Invite"
+msgstr ""
+
+msgctxt "#35088"
+msgid "Preparing…"
+msgstr ""
+
+msgctxt "#35089"
+msgid "Catch up by pausing when tempo is unavailable"
+msgstr ""
+
+msgctxt "#35090"
+msgid "Watching"
+msgstr ""
+
+msgctxt "#35091"
+msgid "Buffering"
+msgstr ""
+
+msgctxt "#35092"
+msgid "Joining"
+msgstr ""
+
+msgctxt "#35093"
+msgid "{} paused"
+msgstr ""
+
+msgctxt "#35094"
+msgid "{} resumed"
+msgstr ""
+
+msgctxt "#35095"
+msgid "{} jumped to {}"
+msgstr ""
+
+msgctxt "#35096"
+msgid "{} joined the room"
+msgstr ""
+
+msgctxt "#35097"
+msgid "{} left the room"
 msgstr ""

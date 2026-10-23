@@ -21,6 +21,11 @@ except ImportError:  # Python 2
 GRAPHQL_URL = "https://community.plex.tv/api"
 SHARED_SERVERS_URL = "https://plex.tv/api/servers/{machine_id}/shared_servers"
 
+# A dead host must not block the caller indefinitely: the invite picker runs
+# these lookups on a worker thread, and a timeout-less urlopen left that worker
+# alive forever (empty picker with no degradation, and a hung shutdown).
+REQUEST_TIMEOUT = 10.0
+
 # PM4K identity headers. CLIENT_ID is a module attribute so the Kodi caller can
 # set it from plex.CLIENT_ID without this module importing Kodi.
 CLIENT_ID = ""
@@ -39,7 +44,7 @@ def _http(method, url, headers, body=None):
     if method:
         req.get_method = lambda: method
     try:
-        resp = urlopen(req)
+        resp = urlopen(req, timeout=REQUEST_TIMEOUT)
     except HTTPError as exc:
         content_type = exc.headers.get("Content-Type", "") if exc.headers else ""
         return exc.code, content_type, exc.read()

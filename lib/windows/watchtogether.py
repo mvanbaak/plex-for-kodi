@@ -14,9 +14,9 @@ import threading
 import time
 
 from kodi_six import xbmc, xbmcgui
-from plexnet import plexapp, plexlibrary, plexobjects
+from plexnet import mediachoice, plexapp, plexlibrary, plexobjects
 
-from lib import plex, plexpeople, player, syncplay, util, watchtogether, ws
+from lib import p3i_detector, plex, plexpeople, player, syncplay, util, watchtogether, ws
 from . import busy, kodigui
 
 
@@ -42,6 +42,11 @@ def parse_source_uri(uri):
 WATCHTOGETHER_HUB_ID = "watchtogether.rooms"
 WATCHTOGETHER_PLACEHOLDER = "script.plex/thumb_fallbacks/movie16x9.png"
 LOCAL_CHANGE_GRACE = 1.5   # seconds to hold off remote applies after a local change
+WT_SEEK_COOLDOWN = 3.0     # seconds between remote-driven seeks (refill guard)
+WT_WIDE_SEEK_DELTA = 10.0  # drift threshold once tempo is unavailable on a player
+WT_PAUSE_CATCHUP_MAX = 2.0 # cap on a local pause catch-up (opt-in, see _pause_catchup)
+WT_TEMPO_FAIL_LIMIT = 2    # consecutive SetTempo failures before tempo is given up
+DETECTOR_TIMEOUT = 30.0    # seconds: pre-scan readiness deadline before fail-open
 
 
 def participant_names(users):
@@ -60,46 +65,136 @@ def participant_names(users):
     return "{0} and {1}".format(", ".join(names[:-1]), names[-1])
 
 
+def identity_user_id(key):
+    """userID from a relay roster identity, or None if it is unparseable."""
+    try:
+        user_id = json.loads(syncplay.strip_identity(key)).get("userID")
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return None if user_id is None else str(user_id)
+
+
+def identity_device_name(key):
+    """deviceName from a relay roster identity, or None."""
+    try:
+        return json.loads(syncplay.strip_identity(key)).get("deviceName")
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 def _player():
     """The live PlexPlayer, or None during addon shutdown (player.PLAYER is
     deleted by player.shutdown() while daemon threads may still tick)."""
     return getattr(player, "PLAYER", None)
 
 
-def room_info_rows(room, live_ids):
+STATUS_INVITED = "invited"
+STATUS_JOINING = "joining"
+STATUS_BUFFERING = "buffering"
+STATUS_WATCHING = "watching"
+
+
+def member_state(on_roster, is_ready, stale=False, slow=False):
+    """Which status row a room member gets (2026-10-23 live-session evidence)."""
+    if not on_roster:
+        return STATUS_INVITED
+    if is_ready is None:
+        return STATUS_JOINING
+    if is_ready is False or stale or slow:
+        return STATUS_BUFFERING
+    return STATUS_WATCHING
+
+
+def state_label(state, ready_label):
+    """Translated label; `ready_label` is Ready in the lobby, Watching elsewhere."""
+    if state == STATUS_INVITED:
+        return util.T(35076, "Invited")
+    if state == STATUS_JOINING:
+        return util.T(35092, "Joining")
+    if state == STATUS_BUFFERING:
+        return util.T(35091, "Buffering")
+    return ready_label
+
+
+def _roster_entry(roster, user_id):
+    """The roster entry for a participant id (matched via identity_user_id),
+    or None when they are not on the roster."""
+    target = str(user_id)
+    for key, entry in (roster or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        if identity_user_id(key) == target:
+            return entry
+    return None
+
+
+def member_state_label(user_id, roster, state_for, ready_label):
+    """The status label for one participant: member_state + state_label."""
+    entry = _roster_entry(roster, user_id)
+    on_roster = entry is not None
+    is_ready = entry.get("isReady") if entry is not None else None
+    stale, slow = state_for(user_id) if state_for is not None else (False, False)
+    return state_label(member_state(on_roster, is_ready, stale, slow), ready_label)
+
+
+def room_info_rows(room, live_ids, state_for=None):
     """One row per room user for the info dialog, marking who is connected.
     `live_ids` are the userIDs seen on the relay roster (only known while
-    connected to that room)."""
+    connected to that room).
+
+    With `state_for`, `sub` becomes the member-status label (Watching for a
+    live member) instead of the bare "Live"/username."""
     rows = []
     for user in (room.participants if room else []):
         if not isinstance(user, dict):
             continue
         name = user.get("title") or user.get("username") or ""
-        is_live = str(user.get("id")) in live_ids
+        user_id = str(user.get("id"))
+        is_live = user_id in live_ids
+        if state_for is None:
+            sub = util.T(35068, "Live") if is_live else (user.get("username") or "")
+        else:
+            stale, slow = state_for(user_id)
+            state = member_state(is_live, True if is_live else None, stale, slow)
+            sub = state_label(state, util.T(35090, "Watching"))
         rows.append({
             "name": name,
-            "sub": util.T(35068, "Live") if is_live else (user.get("username") or ""),
+            "sub": sub,
             "thumb": user.get("thumb") or "",
             "live": is_live,
         })
     return rows
 
 
-def lobby_rows(room, roster):
+def lobby_rows(room, roster, preparing_id=None, state_for=None):
     """One row per room user for the lobby, with readiness status.
 
     Status is "Ready" when the user's id is on the roster with isReady True,
-    else "Invited" (they have not joined/readied yet)."""
+    else "Invited" (they have not joined/readied yet). `preparing_id`, when it
+    matches a user's id (compared as str), overrides the status with
+    "Preparing…" — the local self row while a p3i pre-scan is in flight.
+
+    With `state_for` (a callable(user_id) -> (stale, slow)) the status is the
+    richer member-state set (Joining/Buffering/Watching) instead of the bare
+    Ready/Invited."""
     ready = syncplay.ready_member_ids(roster)
     rows = []
     for user in (room.participants if room else []):
         if not isinstance(user, dict):
             continue
+        user_id = str(user.get("id"))
+        if state_for is None:
+            status = util.T(35075, "Ready") if user_id in ready \
+                else util.T(35076, "Invited")
+        else:
+            status = member_state_label(user_id, roster, state_for,
+                                        util.T(35075, "Ready"))
+        if preparing_id is not None and user_id == preparing_id:
+            status = util.T(35088, "Preparing…")
         rows.append({
             "title": user.get("title") or user.get("username") or "",
             "thumb": user.get("thumb") or "",
-            "status": util.T(35075, "Ready") if str(user.get("id")) in ready
-                      else util.T(35076, "Invited"),
+            "status": status,
         })
     return rows
 
@@ -208,10 +303,44 @@ def confirm_leave():
     from . import optionsdialog
     button = optionsdialog.show(
         util.T(35056, "Leave room"),
-        util.T(35070, "Leave this Watch Together room?"),
+        util.T(35086, "Leave this Watch Together room?"),
         util.T(32328, "Yes"),
         util.T(32329, "No"))
     return button == 0
+
+
+def host_menu_entry(item):
+    """The "Start Watch Together" dropdown entry for `item`, or None when the
+    item cannot resolve a sourceUri (no server uuid / ratingKey).
+
+    Shared by the episodes view, the pre-play screen and Home, so the
+    eligibility rule lives in one place."""
+    server = getattr(item, "server", None)
+    if not (server is not None and getattr(server, "uuid", None)
+            and getattr(item, "ratingKey", None)):
+        return None
+    return {"key": "start_watch_together",
+            "display": util.T(35080, "Start Watch Together")}
+
+
+def confirm_host(dialog_props=None):
+    """Confirm starting a new room when one is already joined: host() leaves the
+    current room, so ask first (mirrors confirm_switch)."""
+    from . import optionsdialog
+    button = optionsdialog.show(
+        util.T(35053, "Watch Together"),
+        util.T(35081, "Leave the current room and start a new one?"),
+        util.T(32328, "Yes"),
+        util.T(32329, "No"),
+        dialog_props=dialog_props)
+    return button == 0
+
+
+def start_hosting(item, dialog_props=None):
+    """Confirm when a room is already joined, then host `item`."""
+    if bridge.supervisor is not None and not confirm_host(dialog_props):
+        return
+    bridge.host(item)
 
 
 def _ws_factory(host, port, on_open, on_message, on_close):
@@ -242,10 +371,23 @@ class WatchTogetherBridge(object):
         self._join_lock = threading.Lock()
         self._auto_join_done = False
         self._local_change_at = 0.0
+        self._last_remote_state_at = 0.0   # monotonic; peer State heartbeat
+        self._peer_probe = None             # (position, monotonic) slow anchor
         self._tempo = 1.0
         self._tempo_retry_at = 0.0
+        self._tempo_failures = 0
+        self._tempo_unavailable = False
+        self._remote_seek_at = 0.0
+        self._catchup_until = 0.0
+        self._toasted = {}                 # (identity_user_id, kind) -> monotonic
+        self._peer_stale_last = None       # last logged peer_stale() value
+        self._peer_slow_last = None        # last logged peer_slow() value
         self._was_connected = False
         self._player_ready = False
+        self._detector_requestid = None
+        self._detector_part_index = 0
+        self._detector_deadline = None
+        self._prepared = True
         self._started = False
         self._hosting = False   # host() owns its lobby; guests auto-open one
         self.lobby = None       # the open LobbyDialog, if any (Task 8)
@@ -279,6 +421,7 @@ class WatchTogetherBridge(object):
                         self._was_connected = sup.connected
                         self.update_status()
                     self.push_local()
+                    self._poll_detector()
                     self._update_ready(sup)
                     self._maybe_auto_start()
             except Exception:
@@ -329,21 +472,40 @@ class WatchTogetherBridge(object):
         self._seen_rooms = current
 
     def refresh_room(self):
-        """Fresh GET /rooms/{id} while the participants dialog is open."""
+        """Fresh GET /rooms/{id} while a dialog is open (participants, invite)."""
         sup = self.supervisor
         if sup is None:
             return
-
-        def work():
-            try:
-                self.room = self.ensure_api().room(sup.room.id)
-            except Exception as exc:
-                util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
-                    exc.__class__.__name__))
-
-        thread = threading.Thread(target=work, name="wt-room")
+        thread = threading.Thread(target=self._refresh_room_work, args=(sup,),
+                                  name="wt-room")
         thread.daemon = True
         thread.start()
+
+    def _refresh_room_work(self, sup):
+        """Fetch the room and hand it to on_roster, which repaints any open
+        lobby. Assigning self.room alone left a refreshed roster off-screen
+        until the next roster push."""
+        try:
+            room = self.ensure_api().room(sup.room.id)
+        except Exception as exc:
+            util.DEBUG_LOG("Watch Together: room refresh failed: {0}".format(
+                exc.__class__.__name__))
+            return
+        # post-request ownership check: a room switch may have happened while
+        # the REST was in flight
+        if self.supervisor is sup:
+            self.on_roster(room)
+
+    def _is_current_room(self, room):
+        """True when `room` is the room we are in.
+
+        Compare ids, not identity: the 15 s roster poll replaces self.room with
+        a fresh Room object, so a picker's snapshot is a different instance by
+        the time its OK is pressed - and an identity check then dropped the
+        invite result entirely."""
+        current = self.room
+        return bool(room is not None and current is not None
+                    and room.id == current.id)
 
     # -- home hub ------------------------------------------------------------
 
@@ -381,6 +543,17 @@ class WatchTogetherBridge(object):
 
     # -- local -> relay -------------------------------------------------------
 
+    def _owns_playback(self):
+        """True only when the video in the player is the room's own item.
+
+        isPlayingVideo() is true for any video. With auto-join the bridge is
+        connected before room playback, so an unrelated movie must not be
+        paused/seeked by room States, nor have its position published."""
+        room = self.room
+        _, room_key = parse_source_uri(room.source_uri) if room is not None \
+            else (None, None)
+        return bool(room_key and room_key == playing_rating_key())
+
     def push_local(self):
         """Feed the supervisor's snapshot at 1 Hz (§5.5). The supervisor sends;
         this only updates what it will send."""
@@ -392,7 +565,7 @@ class WatchTogetherBridge(object):
         # player. Before playback starts, echo the room's position (never 0,
         # which would make us the driver at the start); the supervisor also
         # holds States until synced.
-        if not pl.isPlayingVideo():
+        if not pl.isPlayingVideo() or not self._owns_playback():
             session = sup.session
             pos = int((session.remote.get("position", 0) if session else 0) or 0)
             sup.outbound_state({"position": pos, "paused": True, "doSeek": False})
@@ -404,12 +577,95 @@ class WatchTogetherBridge(object):
         })
 
     def _update_ready(self, sup):
-        """§6.4: ready when video is loaded and not still buffering."""
+        """§6.4: ready when the room's own video is loaded and not buffering.
+
+        The host waiting in the Home lobby has no video yet, so while hosting
+        and not started its readiness is the pre-scan state (`_prepared`); the
+        1 s tick must not overwrite it with a playback check."""
+        if self._hosting and not self._started:
+            self._player_ready = self._prepared
+            sup.set_ready(self._prepared)
+            return
         pl = _player()
         ready = bool(pl is not None and pl.isPlayingVideo()
+                     and self._owns_playback()
                      and not xbmc.getCondVisibility("Player.Caching"))
         self._player_ready = ready
         sup.set_ready(ready)
+
+    # -- host pre-scan (p3i admission) ----------------------------------------
+
+    def _detector_scan_path(self, item):
+        """Part-0 Direct Play URI for `item`, or None (best effort). Same
+        expression as plexplayer.BasePlayer.setupObj: the mapped path when
+        there is one, else the server's key URL with the auth token."""
+        try:
+            choice = item.mediaChoice
+            if choice is None:
+                choice = mediachoice.MediaChoice(item.media()[0], partIndex=0)
+            part = choice.part
+            if part is None:
+                return None
+            server = item.getServer()
+            url = part.getPathMappedUrl()
+            if not url:
+                url = server.buildUrl(part.getAbsolutePath("key"),
+                                      includeToken=True)
+            return url or None
+        except Exception:
+            return None
+
+    def _start_scan(self, item, gate):
+        """Start a p3i pre-scan for `item`. With `gate`, hold readiness until
+        the job completes (or fails open). Returns the requestid, or None."""
+        if self._detector_requestid is not None:
+            return None
+        path = self._detector_scan_path(item)
+        if path is None:
+            return None
+        requestid = p3i_detector.start(path)
+        if requestid is None:
+            return None
+        self._detector_requestid = requestid
+        self._detector_part_index = 0
+        self._detector_deadline = time.monotonic() + DETECTOR_TIMEOUT
+        if gate:
+            self._prepared = False
+        return requestid
+
+    def _poll_detector(self):
+        """Tick the pre-scan state machine from the bridge thread (1 Hz).
+
+        A scan completing after playback has already started is deliberately
+        abandoned: applying P3I.Detector.GetPlayback/Apply at that point is out
+        of scope, and the host can always press Start."""
+        requestid = self._detector_requestid
+        if requestid is None:
+            return
+        status = (p3i_detector.status(requestid) or {}).get('status')
+        if self._detector_requestid != requestid:
+            return                              # leave()/on_gone reset it mid-poll
+        if status == 'completed':
+            self._prepared = True
+            self._detector_requestid = None
+            pl = _player()
+            if pl is not None:
+                pl.wt_detector_requestid = requestid
+                pl.wt_detector_part_index = self._detector_part_index
+        elif status in ('queued', 'running', 'cancelling'):
+            if time.monotonic() >= self._detector_deadline:
+                self._prepared = True           # timeout: fail open
+                p3i_detector.cancel(requestid)  # abandon the scan, not just the state
+                self._detector_requestid = None
+        else:
+            self._prepared = True               # terminal non-completed / error: fail open
+            self._detector_requestid = None
+
+    def _cancel_detector(self):
+        p3i_detector.cancel(self._detector_requestid)
+        self._detector_requestid = None
+        self._prepared = True
+        self._detector_deadline = None
 
     def _maybe_auto_start(self):
         """Start the room once every user in room.users except self is on the
@@ -470,8 +726,10 @@ class WatchTogetherBridge(object):
             return
         self._hosting = True
         self._started = False
-        # the host waits in the lobby rather than buffering the video
-        self._player_ready = True
+        # the host waits in the lobby rather than buffering the video; a p3i
+        # pre-scan holds readiness until it completes (or fails open)
+        self._start_scan(item, gate=True)
+        self._player_ready = self._prepared
         self._open_lobby(host=True)          # blocks until Start/Cancel/ESC
         if self._started and self.supervisor is not None:
             self._play_item(item)            # the room started: open the video
@@ -581,23 +839,33 @@ class WatchTogetherBridge(object):
         One request per id: the server's relationship gate (§11.9) rejects the
         whole request when any target is refused, so batching would lose the
         ones that could have been invited. A dead token is not a per-target
-        failure, so AuthError propagates for the caller to report."""
+        failure, so AuthError propagates for the caller to report.
+
+        Each response is the updated room; the last one is applied through
+        on_roster so an open lobby shows the new members at once, then confirmed
+        with a GET refresh (which also repaints)."""
         if room is None:
             room = self.room
         if room is None:
             return list(user_ids)
         failed = []
         invited = False
+        latest = None
         for user_id in user_ids:
             try:
-                self.ensure_api().invite(room.id, [user_id])
+                latest = self.ensure_api().invite(room.id, [user_id])
                 invited = True
             except watchtogether.AuthError:
                 raise
             except watchtogether.WatchTogetherError:
                 failed.append(user_id)
-        if invited and room is self.room:
-            self.refresh_room()     # pull the new members into the open lobby
+        if invited and self._is_current_room(room):
+            if latest is not None:
+                # the response already carries the updated room: show it now
+                self.on_roster(latest)
+            # confirm with a GET, and repaint again: the poll may have replaced
+            # the room object under us, and the server's view is authoritative
+            self.refresh_room()
         return failed
 
     def invitees(self, room=None):
@@ -675,6 +943,30 @@ class WatchTogetherBridge(object):
 
     # -- relay -> kodi ---------------------------------------------------------
 
+    def _sup_guard(self, sup, fn, *args):
+        """Run fn(*args) only if sup is still the current supervisor.
+
+        A callback from a stopped supervisor must not touch the bridge after
+        another room has been joined (stop() waits ≤5 s; a room REST can take
+        15 s, so an old supervisor can deliver after a switch)."""
+        if self.supervisor is sup:
+            fn(*args)
+
+    def _toast(self, key, kind, text):
+        """One toast per (identity, kind) per 4 s: a flapping peer must not
+        turn the screen into a notification wall (2026-10-23 live session)."""
+        now = time.monotonic()
+        if now - self._toasted.get((key, kind), 0.0) < 4.0:
+            return
+        self._toasted[(key, kind)] = now
+        # prune entries older than 60 s so the dict cannot grow unbounded
+        cutoff = now - 60.0
+        for k in [k for k, t in self._toasted.items() if t < cutoff]:
+            del self._toasted[k]
+        util.DEBUG_LOG("Watch Together: toast {0} {1}: {2}".format(kind, key, text))
+        util.showNotification(text, header=util.T(35053, "Watch Together"),
+                              time_ms=3000)
+
     def on_state(self, remote):
         """syncplay.Session applied a remote State (supervisor thread).
 
@@ -691,6 +983,7 @@ class WatchTogetherBridge(object):
         session = sup.session
         if session is None or not sup.connected:
             return
+        self._last_remote_state_at = time.monotonic()
         self._update_guest_lobby(remote)
         if time.monotonic() - self._local_change_at < LOCAL_CHANGE_GRACE:
             return          # our own change is in flight; don't be reverted
@@ -698,62 +991,145 @@ class WatchTogetherBridge(object):
         # §6.3 foreground/background: v1 approximates "foreground" with "video
         # playing" (no ad-break sync — an explicit v1 non-goal). The lobby and
         # theme-music cases stay background and ignore the relay's playstate.
-        if pl is None or not pl.isPlayingVideo():
+        if pl is None or not pl.isPlayingVideo() or not self._owns_playback():
+            self._catchup_until = 0.0   # playback ended/left: drop any pending freeze
             return
+        if self._catchup_until:
+            if time.monotonic() < self._catchup_until:
+                return          # still frozen in a local catch-up pause
+            self._catchup_until = 0.0
+            pl.wtApplyingRemote("play")
+            pl.control("play")
         local_pos = pl.getTime() or 0.0
         # publish our own position only once it actually matches the room: a
         # just-started video at ~0 (or a seek that hasn't landed yet) would
         # otherwise become the room position and drag everyone to the start
         if abs(local_pos - remote.get("position", 0.0)) < 2.0:
             sup.mark_synced()
+        # any tempo failure widens the tolerance: a player that refuses SetTempo
+        # must not get a seek for a 4-10s drift while the second probe waits
+        seek_ahead = (WT_WIDE_SEEK_DELTA
+                      if self._tempo_unavailable or self._tempo_failures
+                      else syncplay.SEEK_AHEAD)
         action = syncplay.sync_action(local_pos, remote.get("position", 0.0),
                                       remote.get("paused", True),
-                                      session.latency.forward_delay)
+                                      session.latency.forward_delay,
+                                      seek_ahead=seek_ahead)
         want_paused = remote.get("paused")
         is_paused = bool(xbmc.getCondVisibility("Player.Paused"))
+        # the seek target sync_action also computes, hoisted so the catch-up
+        # branch can report the drift it leaves alone (sync_action stays pure
+        # and recomputes its own)
+        target = remote.get("position", 0.0) + \
+            (0 if want_paused else session.latency.forward_delay)
+        if action and action[0] == "tempo" and self._tempo_unavailable:
+            # no tempo on this player: the band is "leave it", unless the opt-in
+            # pause catch-up is on (2026-10-23 CoreELEC report)
+            self._pause_catchup(pl, target)
+            action = None
         applied = False
+        applied_label = None
+        published = remote.get("position", local_pos)
+        # evaluated once: a blocked seek must skip only the seek, never the
+        # trailing publish of anything else applied this tick (e.g. a pause)
+        seek_ok = self._seek_allowed()
+        util.DEBUG_LOG(
+            "Watch Together: drift local={0:.2f} remote={1:.2f} action={2} "
+            "paused={3} seeking={4} caching={5}".format(
+                local_pos, remote.get("position", 0.0), action, want_paused,
+                xbmc.getCondVisibility("Player.Seeking"),
+                xbmc.getCondVisibility("Player.Caching")))
         # arm the echo deadline only when we actually change something: remote
         # States arrive ~1 Hz, so arming on every frame would keep the gate
         # closed and swallow every genuine local event (design §Echo)
         if want_paused is not None and want_paused != is_paused:
-            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.wtApplyingRemote("pause" if want_paused else "play")
             pl.control("pause" if want_paused else "play")
             self._set_tempo(1.0)
             applied = True
-        if remote.get("doSeek"):
+            applied_label = "pause" if want_paused else "play"
+            name = self.display_name(remote.get("setBy"))
+            if name:
+                self._toast(identity_user_id(remote.get("setBy")),
+                            "paused" if want_paused else "resumed",
+                            (util.T(35093, "{} paused") if want_paused
+                             else util.T(35094, "{} resumed")).format(name))
+        if remote.get("doSeek") and seek_ok:
             # §5.6: a peer's explicit seek command — apply even inside the
             # drift band, where sync_action would stay put
-            pl.wt_applying_remote = time.monotonic() + 2.0
+            pl.wtApplyingRemote("seek")
             self._seek_to(remote.get("position", 0.0))
             self._set_tempo(1.0)
             applied = True
-        elif action and action[0] == "seek":
-            pl.wt_applying_remote = time.monotonic() + 2.0
-            self._seek_to(action[1])
-            self._set_tempo(1.0)
-            applied = True
+            applied_label = "seek (explicit)"
+            name = self.display_name(remote.get("setBy"))
+            if name:
+                self._toast(identity_user_id(remote.get("setBy")), "jumped",
+                            util.T(35095, "{} jumped to {}").format(
+                                name, util.simplifiedTimeDisplay(
+                                    int(remote.get("position", 0.0) * 1000))))
+        elif action and action[0] == "seek" and seek_ok:
+            gap = local_pos - action[1]
+            if gap > 0:
+                # the peer is behind us, so it is the side that must catch up: its
+                # own client sees the room ahead and seeks forward. Dragging the
+                # host back to a stalled peer is the jolt users report, and
+                # peer_slow() flickers while a stuck peer wobbles by a second
+                # (2026-10-23 live sessions), so this never moves us backwards.
+                util.DEBUG_LOG(
+                    "Watch Together: peer is behind, not seeking back "
+                    "{0:.1f}s".format(gap))
+            else:
+                pl.wtApplyingRemote("seek")
+                self._seek_to(action[1])
+                self._set_tempo(1.0)
+                applied = True
+                applied_label = "seek"
+                published = action[1]
+                name = self.display_name(remote.get("setBy"))
+                if name:
+                    self._toast(identity_user_id(remote.get("setBy")), "jumped",
+                                util.T(35095, "{} jumped to {}").format(
+                                    name, util.simplifiedTimeDisplay(
+                                        int(action[1] * 1000))))
         elif action and action[0] == "tempo":
             # §6.2 gentle catch-up: slow to 0.95 with pitch preserved (Kodi 21+)
             result = self._set_tempo(action[1])
             if result is False:
-                # no tempo here: degrade to a hard seek so drift still converges
-                target = remote.get("position", 0.0) + \
-                    (0 if remote.get("paused") else session.latency.forward_delay)
-                pl.wt_applying_remote = time.monotonic() + 2.0
-                self._seek_to(target)
-                applied = True
-            # result True: tempo applied; None: player busy, retry next tick
+                # tempo unavailable here: a hard seek lands on the previous
+                # keyframe and re-creates the drift (2026-10-23 CoreELEC).
+                # Leave the drift alone — the widened threshold already limits
+                # correction to genuinely large drift.
+                util.DEBUG_LOG("Watch Together: tempo unavailable; drift {0:.2f}s "
+                               "left alone".format(local_pos - target))
+            # result True: tempo applied; None: busy/backing off, retry next tick
         else:
             self._set_tempo(1.0)   # inside the drift band: clear any catch-up
         if applied:
-            util.DEBUG_LOG("Watch Together: applied remote {0} (paused={1}, pos={2})".format(
-                action, want_paused, remote.get("position")))
+            # Feed the state we just applied. The supervisor only *stores* this
+            # snapshot and its 1 Hz loop is the single sender, so its next beat
+            # would otherwise publish the pre-apply one - last-setBy wins, the
+            # room flips back and the peer undoes us: a stale paused made the
+            # browser resume (seen live as pause/resume/pause), and a stale
+            # position would make it seek back. Player.Paused and getTime() both
+            # lag their commands by a few ms, so read neither here.
+            sup.outbound_state({
+                "position": published,
+                "paused": want_paused if want_paused is not None else is_paused,
+                "doSeek": False,
+            })
+            # log what was applied, not the drift decision: a pause tick also
+            # carries action=('seek', ...) when the peer is behind, and printing
+            # that made a skipped seek look like an applied one (2026-10-23)
+            util.DEBUG_LOG("Watch Together: applied {0} (paused={1}, pos={2})".format(
+                applied_label, want_paused, published))
 
     def _set_tempo(self, tempo):
         """§6.2 pitch-preserved tempo catch-up, via JSON-RPC Player.SetTempo
-        (Kodi 21+). Returns True when applied, False when unavailable/failed
-        (caller hard-seeks), or None when the player is busy seeking/caching
-        (retry next tick)."""
+        (Kodi 21+). Returns True when applied, False when tempo is unavailable
+        on this player (the caller leaves the drift alone), or None when not
+        now: the player is busy seeking/caching or we are backing off (retry
+        next tick)."""
         if tempo == self._tempo:
             return True
         # SetTempo is refused while the player is mid-seek or buffering (seen
@@ -763,30 +1139,61 @@ class WatchTogetherBridge(object):
             return None
         now = time.monotonic()
         if now < self._tempo_retry_at:
-            return False
+            return None
         if util.KODI_VERSION_MAJOR < 21:
+            self._tempo_unavailable = True
             self._tempo_retry_at = now + 3600.0
             util.LOG("Watch Together: tempo catch-up needs Kodi 21+ (have {0}); "
-                     "using hard seek".format(util.KODI_VERSION_MAJOR))
+                     "widening the drift tolerance".format(util.KODI_VERSION_MAJOR))
             return False
         try:
             players = util.rpc.Player.GetActivePlayers() or []
             playerid = next((p["playerid"] for p in players
                              if p.get("type") == "video"), None)
             if playerid is None:
-                return False
+                return None
             util.rpc.Player.SetTempo(playerid=playerid, tempo=tempo)
             self._tempo = tempo
+            self._tempo_failures = 0
             util.DEBUG_LOG("Watch Together: tempo {0}".format(tempo))
             return True
-        except Exception as exc:
+        except Exception:
             # SetTempo is advertised on Kodi 21 but the player may still refuse
-            # it. Back off and hard-seek meanwhile.
-            self._tempo_retry_at = now + 60.0
+            # it. Count the failures; after a few, give up for the session and
+            # widen the drift tolerance instead of probing every minute.
+            self._tempo_failures += 1
             self._tempo = 1.0
-            util.LOG("Watch Together: SetTempo failed ({0}); using hard seek "
-                     "(retry in 60s)".format(exc))
+            if self._tempo_failures >= WT_TEMPO_FAIL_LIMIT:
+                self._tempo_unavailable = True
+                self._tempo_retry_at = now + 3600.0
+                util.LOG("Watch Together: tempo unavailable on this player; "
+                         "widening the drift tolerance")
+            else:
+                self._tempo_retry_at = now + 60.0
             return False
+
+    def _pause_catchup(self, pl, target):
+        """Tempo-less player: lose the drift by freezing locally instead of
+        seeking, which lands a GOP early on this decoder (2026-10-23 report).
+        Never broadcast: the freeze is ours, the room must not pause."""
+        if not util.getSetting("watchtogether.pause_catchup", False):
+            return
+        ahead = (pl.getTime() or 0.0) - target
+        if not (syncplay.TEMPO_DIFF < ahead <= WT_PAUSE_CATCHUP_MAX):
+            return
+        pl.wtApplyingRemote("pause")
+        pl.control("pause")
+        self._catchup_until = time.monotonic() + ahead
+        util.DEBUG_LOG("Watch Together: catch-up pause {0:.2f}s".format(ahead))
+
+    def _seek_allowed(self):
+        """A remote State must not seek a player that is already refilling, and
+        must not stack seeks: during a refill the clock is frozen, so every 1 Hz
+        beat would read drift and add another seek (2026-10-23 CoreELEC report)."""
+        if (xbmc.getCondVisibility("Player.Seeking")
+                or xbmc.getCondVisibility("Player.Caching")):
+            return False
+        return time.monotonic() - self._remote_seek_at >= WT_SEEK_COOLDOWN
 
     def _seek_to(self, target):
         """Through the seek dialog when it exists (it owns the full local seek
@@ -801,6 +1208,7 @@ class WatchTogetherBridge(object):
             dialog.doSeek(int(target * 1000))
         else:
             pl.seekTime(target)
+        self._remote_seek_at = time.monotonic()
 
     # -- supervisor callbacks ---------------------------------------------------
 
@@ -818,12 +1226,26 @@ class WatchTogetherBridge(object):
         self.update_status()
 
     def on_event(self, kind, key):
-        util.DEBUG_LOG("Watch Together: roster {0}".format(kind))
+        try:
+            util.DEBUG_LOG("Watch Together: roster {0} {1}".format(
+                kind, identity_user_id(key)))
+            if kind not in ("joined", "left"):
+                return
+            name = self.display_name(key)
+            if not name:
+                return
+            text = (util.T(35096, "{} joined the room") if kind == "joined"
+                    else util.T(35097, "{} left the room")).format(name)
+            self._toast(identity_user_id(key), kind, text)
+        except Exception:
+            util.ERROR()
 
     def _on_ready(self, key, is_ready):
         """A peer's readiness changed (§6.4). Refresh the open lobby and start
         the room once everyone is ready. Supervisor thread — never raise."""
         try:
+            util.DEBUG_LOG("Watch Together: ready {0}={1}".format(
+                identity_user_id(key), is_ready))
             refresh = getattr(self.lobby, "refresh", None)
             if refresh is not None:
                 refresh()
@@ -848,6 +1270,7 @@ class WatchTogetherBridge(object):
             self.supervisor = None
             self.room = None
             self._reset_player_link(forget_room=True)
+            self._cancel_detector()
         util.showNotification(util.T(35059, "The Watch Together room has ended"))
         if current:
             current.stop()
@@ -866,12 +1289,15 @@ class WatchTogetherBridge(object):
         sup = watchtogether.SessionSupervisor(room, identity,
                                               plexapp.ACCOUNT.authToken,
                                               _ws_factory, log=util.DEBUG_LOG)
-        sup.on_state = self.on_state
-        sup.on_roster = self.on_roster
-        sup.on_disconnected = self.on_disconnected
+        # bind each callback to its own supervisor: stop() waits ≤5 s but a
+        # room REST can take 15 s, so an old supervisor must not deliver into
+        # the bridge after another room has been joined
+        sup.on_state = lambda remote, s=sup: self._sup_guard(s, self.on_state, remote)
+        sup.on_roster = lambda room, s=sup: self._sup_guard(s, self.on_roster, room)
+        sup.on_disconnected = lambda s=sup: self._sup_guard(s, self.on_disconnected)
         sup.on_gone = lambda s=sup: self.on_gone(s)
-        sup.on_event = self.on_event
-        sup.on_ready = self._on_ready
+        sup.on_event = lambda kind, key, s=sup: self._sup_guard(s, self.on_event, kind, key)
+        sup.on_ready = lambda key, ready, s=sup: self._sup_guard(s, self._on_ready, key, ready)
         with self._join_lock:
             if self.supervisor is not None:   # someone joined while we fetched
                 return self.supervisor
@@ -883,6 +1309,8 @@ class WatchTogetherBridge(object):
             self.supervisor = sup
             self._was_connected = False
             self._started = False
+            self._last_remote_state_at = 0.0
+            self._peer_probe = None
             pl = _player()
             if pl is not None:
                 pl.wt_broadcast = self.on_local_change
@@ -943,6 +1371,7 @@ class WatchTogetherBridge(object):
             sup, self.supervisor = self.supervisor, None
             self.room = None
             self._reset_player_link(forget_room=False)
+        self._cancel_detector()     # Cancel is JSON-RPC: keep it off the join lock
         if sup:
             sup.stop()
 
@@ -956,6 +1385,7 @@ class WatchTogetherBridge(object):
             sup, room = self.supervisor, self.room
             self.supervisor = None
             self.room = None
+            self._cancel_detector()
             self._reset_player_link(forget_room=True)
         if room is not None and self.api is not None:
             try:
@@ -995,11 +1425,86 @@ class WatchTogetherBridge(object):
             return set()
         ids = set()
         for key in list(sup.session.roster):
-            try:
-                ids.add(str(json.loads(syncplay.strip_identity(key)).get("userID")))
-            except (ValueError, TypeError, AttributeError):
-                pass
+            user_id = identity_user_id(key)
+            if user_id is not None:
+                ids.add(user_id)
         return ids
+
+    def display_name(self, key):
+        """A human name for a roster identity: the matching room participant's
+        title (fallback username), else the identity's deviceName, else ""."""
+        name = ""
+        user_id = identity_user_id(key)
+        if user_id is not None:
+            for user in (self.room.participants if self.room else []):
+                if not isinstance(user, dict):
+                    continue
+                if str(user.get("id")) == user_id:
+                    name = user.get("title") or user.get("username") or ""
+                    break
+        return name or identity_device_name(key) or ""
+
+    def peer_stale(self):
+        """True when no peer State has arrived for >5 s (the peer stalled)."""
+        stale = self._last_remote_state_at and \
+            time.monotonic() - self._last_remote_state_at > 5.0
+        if bool(stale) != self._peer_stale_last:
+            self._peer_stale_last = bool(stale)
+            util.DEBUG_LOG("Watch Together: peer stale={0}".format(bool(stale)))
+        return stale
+
+    def peer_slow(self):
+        """True when, over at least 8 s, the room position advanced less than
+        0.9x the elapsed time — a buffering peer. Only meaningful for a
+        2-participant room (self + one peer); else False.
+
+        A backward jump or an explicit seek re-anchors the probe, so a peer's
+        rewind is not read as ~10x its distance of buffering."""
+        slow = self._peer_slow_now()
+        if slow != self._peer_slow_last:
+            self._peer_slow_last = slow
+            util.DEBUG_LOG("Watch Together: peer slow={0}".format(slow))
+        return slow
+
+    def _peer_slow_now(self):
+        room = self.room
+        if room is None or len(room.participants) != 2:
+            self._peer_probe = None    # a 3rd member joined/left: drop the anchor
+            return False
+        sup = self.supervisor
+        session = sup.session if sup is not None else None
+        if session is None or session.remote is None \
+                or session.remote.get("paused", True):
+            self._peer_probe = None     # paused is not slow; re-anchor on resume
+            return False
+        now = time.monotonic()
+        pos = session.remote.get("position", 0.0)
+        probe = self._peer_probe
+        if probe is None:
+            self._peer_probe = (pos, now)
+            return False
+        anchor_pos, anchor_at = probe
+        if pos < anchor_pos or session.remote.get("doSeek"):
+            # a peer jumped backwards or seeked: re-anchor at the new position
+            # instead of letting the drop read as buffering
+            self._peer_probe = (pos, now)
+            return False
+        elapsed = now - anchor_at
+        if elapsed < 8.0:
+            return False
+        if pos - anchor_pos >= 0.9 * elapsed:
+            self._peer_probe = (pos, now)   # healthy: re-anchor the window
+            return False
+        return True
+
+    def _participant_state(self, user_id):
+        """(stale, slow) for a participant row. The stale/slow heuristics are
+        peer-only: our own row must never show buffering from a stalled peer,
+        so it returns (False, False) for our account id. Readiness still comes
+        from the roster for every row."""
+        if str(getattr(plexapp.ACCOUNT, "ID", None)) == str(user_id):
+            return (False, False)
+        return (self.peer_stale(), self.peer_slow())
 
     def room_clicked(self, room):
         """Hub tile click: join and watch, switch, or (already watching) open
@@ -1025,8 +1530,13 @@ class WatchTogetherBridge(object):
             util.showNotification(str(exc))
             return None
         # a room that has not started shows the lobby (over Home) first; the
-        # lobby closes on the first playing State, then the video opens
+        # lobby closes on the first playing State, then the video opens. A
+        # guest pre-scans the room item best-effort (never gating readiness)
+        # so the direct-play path is ready if the job completes before the
+        # room starts; the tick/disconnect abandons it otherwise.
         if self._room_unstarted():
+            item = self._room_media_item(room)
+            self._start_scan(item, gate=False)
             self._open_lobby(host=False)
         return self._watch_room(room)
 
@@ -1039,8 +1549,18 @@ class WatchTogetherBridge(object):
         self.join(room_id)
 
     def _reset_player_link(self, forget_room=False):
+        # restore normal speed before detaching: a remote catch-up may have
+        # left the player at 0.95, and leaving via the OSD keeps the video
+        # running, so it would stay slowed after sync has ended
+        if self._tempo != 1.0:
+            self._set_tempo(1.0)
+        self._tempo = 1.0
+        self._last_remote_state_at = 0.0
+        self._peer_probe = None
         player.PLAYER.wt_broadcast = None
         player.PLAYER.wt_applying_remote = 0.0
+        player.PLAYER.wt_detector_requestid = None
+        player.PLAYER.wt_detector_part_index = 0
         self._started = False
         self._hosting = False
         self._close_lobby()     # session ended: no lobby may outlive it
@@ -1134,15 +1654,25 @@ class ParticipantsDialog(kodigui.BaseDialog, util.CronReceiver):
     def _sync(self):
         room = bridge.room
         participants = room.participants if room else []
-        key = tuple(sorted(str(u.get('id')) for u in participants))
+        sup = bridge.supervisor
+        roster = sup.session.roster \
+            if sup is not None and sup.session is not None else {}
+        watching = util.T(35090, "Watching")
+        rows = [{
+            "name": u.get('title') or u.get('username') or '',
+            "thumb": u.get('thumb') or '',
+            "status": member_state_label(str(u.get('id')), roster,
+                                         bridge._participant_state, watching),
+        } for u in participants]
+        key = tuple((str(u.get('id')), r['status'])
+                    for u, r in zip(participants, rows))
         if key == self._key:
             return
         self._key = key
         items = [kodigui.ManagedListItem(
-            u.get('title') or u.get('username') or '',
-            u.get('username') or '',
-            thumbnailImage=u.get('thumb') or '',
-            data_source=u) for u in participants]
+            r['name'], r['status'],
+            thumbnailImage=r['thumb'],
+            data_source=u) for u, r in zip(participants, rows)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
@@ -1187,10 +1717,11 @@ class RoomInfoDialog(kodigui.BaseDialog):
 
     def _sync(self):
         live = bridge._live_user_ids()
+        state_for = bridge._participant_state if live else None
         items = [kodigui.ManagedListItem(row['name'], row['sub'],
                                          thumbnailImage=row['thumb'],
                                          data_source=self.room)
-                 for row in room_info_rows(self.room, live)]
+                 for row in room_info_rows(self.room, live, state_for)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 
@@ -1238,7 +1769,12 @@ class LobbyDialog(kodigui.BaseDialog):
     def refresh(self):
         """Re-read the roster and repaint (called from the supervisor thread on
         a roster/readiness change — never raise). Membership comes from
-        bridge.room in _sync, so an invitee added by the 15 s poll appears."""
+        bridge.room in _sync, so an invitee added by the 15 s poll appears.
+
+        Kodi only delivers onNotification to xbmc.Monitor, never to a window
+        (see Kodi's Window.h callback list), so there is no UI-thread hand-off
+        to queue into here: _sync rejects the work once the dialog is closing,
+        which is the state a stale callback would otherwise corrupt."""
         if getattr(self, 'peopleList', None) is None:
             return          # window not initialised yet: nothing to repaint
         sup = bridge.supervisor
@@ -1251,13 +1787,19 @@ class LobbyDialog(kodigui.BaseDialog):
             util.ERROR()
 
     def _sync(self):
+        if self._closing:
+            return          # closed while a callback still held this dialog
         # the open lobby must follow the bridge's live room (on_roster replaces
         # it every 15 s); self.room is only the fallback before the first poll
         room = bridge.room or self.room
+        preparing_id = None
+        if bridge._detector_requestid is not None:
+            preparing_id = str(plexapp.ACCOUNT.ID)
         items = [kodigui.ManagedListItem(row['title'], row['status'],
                                          thumbnailImage=row['thumb'],
                                          data_source=room)
-                 for row in lobby_rows(room, self.roster)]
+                 for row in lobby_rows(room, self.roster, preparing_id,
+                                       bridge._participant_state)]
         self.peopleList.reset()
         self.peopleList.addItems(items)
 

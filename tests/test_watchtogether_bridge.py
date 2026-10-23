@@ -22,7 +22,7 @@ from .base import KodiTestCase  # noqa: E402
 ROOM_JSON = {
     "id": "ca8cfezmke4",
     "title": "A Fazenda – S18 • E20",
-    "sourceUri": "server://x/metadata/227117",
+    "sourceUri": "server://x/com.plexapp.plugins.library/library/metadata/227117",
     "createdBy": 1000001,
     "startsAt": 1791128438,
     "updatedAt": 1791128438,
@@ -93,9 +93,9 @@ class FakeHandler(object):
 
 
 class FakePlayer(object):
-    def __init__(self, playing=True, video=True, position=50.0, paused=False):
+    def __init__(self, playing=True, video="227117", position=50.0, paused=False):
         self.playing = playing
-        self.video = video
+        self.video = FakeVideo(video) if video else None
         self.position = position
         self.paused = paused
         self.controls = []
@@ -104,7 +104,16 @@ class FakePlayer(object):
         self.handler = FakeHandler()
         self.wt_broadcast = None
         self.wt_applying_remote = 0.0
+        self.wt_applied_kind = None
+        self.wt_detector_requestid = None
+        self.wt_detector_part_index = 0
         self.pauseAfterPlaybackStarted = False
+
+    def wtApplyingRemote(self, kind):
+        # mirrors PlexPlayer.wtApplyingRemote: arm the echo deadline and record
+        # which kind of change it is the echo of
+        self.wt_applying_remote = float("inf")
+        self.wt_applied_kind = kind
 
     def playVideo(self, video, resume=False):
         self.videos.append((video, resume))
@@ -219,10 +228,13 @@ class BridgeTestCase(KodiTestCase):
         self._saved_player = wtwin.player.PLAYER
         self._saved_notification = wtwin.util.showNotification
         self.toasts = []
-        wtwin.util.showNotification = self.toasts.append
+        self.notifications = []
+        wtwin.util.showNotification = self._record_notification
         util.setSetting("watchtogether.show_osd_status", "true")
         util.setSetting("watchtogether.last_room", "")
+        util.setSetting("watchtogether.pause_catchup", "false")
         self.bridge = wtwin.WatchTogetherBridge()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
         self.player = FakePlayer()
         wtwin.player.PLAYER = self.player
         ENV.cond_visibility["Player.Paused"] = (
@@ -234,7 +246,15 @@ class BridgeTestCase(KodiTestCase):
         wtwin.util.showNotification = self._saved_notification
         util.setSetting("watchtogether.show_osd_status", "true")
         util.setSetting("watchtogether.last_room", "")
+        util.setSetting("watchtogether.pause_catchup", "false")
         super(BridgeTestCase, self).tearDown()
+
+    def _record_notification(self, message, time_ms=3000, icon_path=None,
+                             header=None):
+        # capture the full call for header/time_ms assertions, but keep
+        # self.toasts as bare messages so the existing assertions still hold
+        self.toasts.append(message)
+        self.notifications.append((message, header, time_ms))
 
 
 class SnapshotTest(BridgeTestCase):
@@ -251,7 +271,7 @@ class SnapshotTest(BridgeTestCase):
         # theme's position, or peers would seek their video to it. We still
         # emit an idle State so the relay does not reap the silent socket.
         self.bridge.supervisor = FakeSupervisor()
-        self.player.video = False
+        self.player.video = None
         self.player.position = 99.0
         self.bridge.push_local()
         self.assertEqual(self.bridge.supervisor.sent,
@@ -284,10 +304,10 @@ class ReadinessTest(BridgeTestCase):
     def test_ready_tracks_playback(self):
         sup = FakeSupervisor()
         self.bridge.supervisor = sup
-        self.player.video = True
+        self.player.video = FakeVideo("227117")
         self.bridge._update_ready(sup)
         self.assertIs(sup.ready, True)
-        self.player.video = False
+        self.player.video = None
         self.bridge._update_ready(sup)
         self.assertIs(sup.ready, False)
 
@@ -414,6 +434,141 @@ class LobbyDialogTest(KodiTestCase):
             wtwin.bridge.supervisor = saved_sup
         self.assertEqual([i.label for i in d.peopleList.items], ["A", "B"])
 
+    def test_refresh_repaints_without_any_notification(self):
+        # Kodi delivers onNotification to xbmc.Monitor only, never to a window
+        # (see Window.h's callback list), so routing the repaint through
+        # NotifyAll left the lobby stale and the invite picker empty on a live
+        # client. refresh() must paint the list itself.
+        class FakeList(object):
+            def __init__(self):
+                self.items = []
+
+            def reset(self):
+                self.items = []
+
+            def addItems(self, items):
+                self.items += items
+
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[{"id": 1, "title": "A"}]),
+                              roster={}, host=True)
+        d.peopleList = FakeList()
+        d.refresh()
+        self.assertEqual([i.label for i in d.peopleList.items], ["A"],
+                         "refresh() must paint the list itself")
+
+    def test_sync_is_a_no_op_once_the_dialog_is_closing(self):
+        # a callback still holding a closed dialog must not touch its controls
+        class ExplodingList(object):
+            def reset(self):
+                raise AssertionError("closed dialog's list was repainted")
+
+            def addItems(self, items):
+                raise AssertionError("closed dialog's list was repainted")
+
+        d = wtwin.LobbyDialog(room=FakeRoom(users=[{"id": 1, "title": "A"}]),
+                              roster={}, host=True)
+        d.peopleList = ExplodingList()
+        d._closing = True
+        d._sync()               # must be a no-op, not a native call
+
+
+class LobbyPreparingTest(KodiTestCase):
+    """The lobby's self row shows "Preparing…" while a p3i scan is in flight."""
+
+    class FakeList(object):
+        def __init__(self):
+            self.items = []
+
+        def reset(self):
+            self.items = []
+
+        def addItems(self, items):
+            self.items += items
+
+    def setUp(self):
+        super(LobbyPreparingTest, self).setUp()
+        self._saved = (wtwin.plexapp.ACCOUNT, wtwin.bridge.room,
+                       wtwin.bridge._detector_requestid)
+
+    def tearDown(self):
+        (wtwin.plexapp.ACCOUNT, wtwin.bridge.room,
+         wtwin.bridge._detector_requestid) = self._saved
+        super(LobbyPreparingTest, self).tearDown()
+
+    def _sync_rows(self):
+        class Account(object):
+            ID = 1000001
+
+        wtwin.plexapp.ACCOUNT = Account()
+        wtwin.bridge.room = watchtogether.Room(ROOM_JSON)
+        d = wtwin.LobbyDialog(room=wtwin.bridge.room, roster={}, host=True)
+        d.peopleList = self.FakeList()
+        d._sync()
+        return [(i.label, i.label2) for i in d.peopleList.items]
+
+    def test_lobby_self_row_shows_preparing(self):
+        wtwin.bridge._detector_requestid = "job-1"
+        rows = self._sync_rows()
+        self.assertEqual([t for t, _ in rows], ["Owner", "Guest"])
+        self.assertEqual([s for _, s in rows],
+                         [util.T(35088, "Preparing…"), "Invited"])
+
+    def test_lobby_self_row_without_a_job_is_ready_or_invited(self):
+        wtwin.bridge._detector_requestid = None
+        rows = self._sync_rows()
+        self.assertEqual([s for _, s in rows], ["Invited", "Invited"])
+
+
+class HostMenuEntryTest(KodiTestCase):
+    """The item-menu entry that starts a room, shared by the episodes view, the
+    pre-play screen and Home."""
+
+    def test_offered_for_an_eligible_item(self):
+        entry = wtwin.host_menu_entry(FakeItem())
+        self.assertEqual(entry["key"], "start_watch_together")
+        self.assertEqual(entry["display"],
+                         util.T(35080, "Start Watch Together"))
+
+    def test_not_offered_without_a_server(self):
+        item = FakeItem()
+        item.server = None
+        self.assertIsNone(wtwin.host_menu_entry(item))
+
+    def test_not_offered_without_a_server_uuid(self):
+        # no uuid -> sourceUri cannot resolve, so the room could not be created
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(machine=None)))
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(machine="")))
+
+    def test_not_offered_without_a_rating_key(self):
+        self.assertIsNone(wtwin.host_menu_entry(FakeItem(rating_key=None)))
+
+    def test_start_hosting_hosts_straight_away_without_a_room(self):
+        saved_host, saved_sup = wtwin.bridge.host, wtwin.bridge.supervisor
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = None
+        try:
+            wtwin.start_hosting(FakeItem())
+        finally:
+            wtwin.bridge.host, wtwin.bridge.supervisor = saved_host, saved_sup
+        self.assertEqual(len(hosted), 1, "nothing joined: no confirm, just host")
+
+    def test_start_hosting_confirms_before_leaving_a_room(self):
+        saved = (wtwin.bridge.host, wtwin.bridge.supervisor, wtwin.confirm_host)
+        hosted = []
+        wtwin.bridge.host = hosted.append
+        wtwin.bridge.supervisor = object()
+        try:
+            wtwin.confirm_host = lambda *a, **k: False
+            wtwin.start_hosting(FakeItem())
+            self.assertEqual(hosted, [], "declined: must not leave the room")
+            wtwin.confirm_host = lambda *a, **k: True
+            wtwin.start_hosting(FakeItem())
+        finally:
+            (wtwin.bridge.host, wtwin.bridge.supervisor,
+             wtwin.confirm_host) = saved
+        self.assertEqual(len(hosted), 1, "confirmed: host the new room")
+
 
 class InviteRowsTest(KodiTestCase):
     """invite_rows: the invite picker's list-item properties."""
@@ -469,10 +624,24 @@ class InviteDialogTest(KodiTestCase):
         d.peopleList.items[1].setProperty("selected", "1")
         self.assertEqual(d._selected_ids(), [2])
 
+    def test_fetch_paints_the_list_without_any_notification(self):
+        # the picker's only paint path used to be a NotifyAll/onNotification
+        # hand-off, which Kodi never delivers to a window - so the list stayed
+        # empty (0 invitees) on a live client. _fetch must paint it itself.
+        saved = wtwin.bridge.invitees
+        wtwin.bridge.invitees = lambda room=None: [
+            plexpeople.Invitee(1, "a", "", False),
+            plexpeople.Invitee(2, "b", "", True)]
+        try:
+            d = self.dialog()
+            d._fetch()
+        finally:
+            wtwin.bridge.invitees = saved
+        self.assertEqual([i.label for i in d.peopleList.items], ["a", "b"])
+
     def test_fetch_degrades_when_invitees_raises(self):
         # a people lookup failure must not break the picker
         saved = wtwin.bridge.invitees
-        synced = []
 
         def boom(*a, **k):
             raise ValueError("people lookup failed")
@@ -480,12 +649,11 @@ class InviteDialogTest(KodiTestCase):
         wtwin.bridge.invitees = boom
         try:
             d = self.dialog()
-            d._sync = lambda: synced.append(True)
             d._fetch()
         finally:
             wtwin.bridge.invitees = saved
         self.assertEqual(d._invitees, [])
-        self.assertEqual(synced, [True])
+        self.assertEqual(d.peopleList.items, [], "an empty picker, not a crash")
 
     def test_fetch_uses_the_dialog_room(self):
         # a picker opened from a room tile must query that tile's room, not
@@ -665,6 +833,31 @@ class AutoStartTest(BridgeTestCase):
         self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
         self.assertEqual(self.player.controls, [])
         self.assertEqual(getattr(self.bridge.supervisor, "sent_now", 0), 0)
+
+    def test_host_is_ready_in_the_home_lobby(self):
+        # host() waits in the lobby with no video; the 1 s tick's _update_ready
+        # must not overwrite the host's readiness with False
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._started = False
+        self.player.video = None
+        self.bridge._update_ready(sup)
+        self.assertTrue(self.bridge._player_ready)
+        self.assertTrue(sup.ready)
+
+    def test_host_auto_start_after_a_readiness_tick(self):
+        # the full sequence the review reproduced: tick readiness, then
+        # auto-start once every invited member is ready
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._started = False
+        self.bridge.room = self.room([1, 2])
+        self.player.video = None
+        self.bridge._update_ready(sup)                    # the 1 s tick
+        self.fire_ready({
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": True}})
+        self.assertIn("play", self.player.controls, "auto-start fires")
 
     def test_auto_start_holds_until_self_is_ready(self):
         self.bridge.supervisor = FakeSupervisor()
@@ -853,6 +1046,7 @@ class HostFlowTest(BridgeTestCase):
                          "first failure")
 
     def test_invite_without_a_room_fails_every_id(self):
+        self.bridge.room = None
         self.assertEqual(self.bridge.invite([1, 2]), [1, 2])
 
     def test_invite_targets_an_explicit_room(self):
@@ -875,22 +1069,92 @@ class HostFlowTest(BridgeTestCase):
         self.bridge.start_playback()
         self.assertEqual(self.player.controls, ["play"])
 
-    def test_invite_refreshes_the_current_room(self):
-        # the invited member must show up in the open lobby
+    def test_invite_applies_the_response_room_at_once(self):
+        # the invite response is the updated room, so applying it here is what
+        # makes the invited member appear in the open lobby immediately instead
+        # of on the next roster push (up to the 15 s poll)
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
         self.bridge.room = watchtogether.Room(ROOM_JSON)
         self.bridge.supervisor = FakeSupervisor()
-        refreshes = []
-        self.bridge.refresh_room = lambda: refreshes.append(True)
-        self.assertEqual(self.bridge.invite([1]), [])
-        self.assertEqual(refreshes, [True])
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.assertEqual(self.bridge.invite([9]), [])
+        self.assertIn(9, self.bridge.room.user_ids,
+                      "the response room replaced the stale one")
+        self.assertGreaterEqual(lobby.refreshes, 1,
+                                "the open lobby was repainted")
 
-    def test_invite_does_not_refresh_for_another_room(self):
+    def test_invite_applies_when_a_poll_replaced_the_room_object(self):
+        # the 15 s roster poll replaces bridge.room with a fresh Room, so an
+        # identity check against the picker's snapshot fails - and then neither
+        # the response nor a refresh is applied, leaving the invitee to appear
+        # only on the next poll (the reported 15 s delay)
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
+        self.bridge.supervisor = FakeSupervisor()
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        picker_room = watchtogether.Room(ROOM_JSON)       # snapshot at open
+        self.bridge.room = picker_room
+        self.bridge.room = watchtogether.Room(ROOM_JSON)  # the poll replaced it
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.assertEqual(self.bridge.invite([9], picker_room), [])
+        self.assertIn(9, self.bridge.room.user_ids,
+                      "the invitee must be applied even though the poll "
+                      "replaced the room object")
+        self.assertGreaterEqual(lobby.refreshes, 1)
+
+    def test_refresh_room_repaints_the_open_lobby(self):
+        # the worker assigned self.room without telling the lobby, so a
+        # refreshed room never reached the screen
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.api.room_out = dict(ROOM_JSON, users=ROOM_JSON["users"] + [
+            {"id": 9, "username": "new", "title": "New", "uuid": "u9"}])
+        self.bridge._refresh_room_work(sup)
+        self.assertEqual(lobby.refreshes, 1, "the refreshed room must repaint")
+        self.assertIn(9, self.bridge.room.user_ids)
+
+    def test_invite_does_not_apply_another_rooms_response(self):
+        # inviting into a room that is not the bridge's current one must not
+        # repaint this room's lobby
+        class FakeLobby(object):
+            def __init__(self):
+                self.refreshes = 0
+
+            def refresh(self):
+                self.refreshes += 1
+
         self.bridge.room = watchtogether.Room(dict(ROOM_JSON, id="current"))
         other = watchtogether.Room(dict(ROOM_JSON, id="other"))
-        refreshes = []
-        self.bridge.refresh_room = lambda: refreshes.append(True)
+        lobby = FakeLobby()
+        self.bridge.lobby = lobby
         self.assertEqual(self.bridge.invite([1], other), [])
-        self.assertEqual(refreshes, [])
+        self.assertEqual(lobby.refreshes, 0)
 
     def test_cancel_leaves_without_destroying(self):
         self.bridge.room = watchtogether.Room(ROOM_JSON)
@@ -1030,6 +1294,58 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertGreater(self.player.wt_applying_remote, time.monotonic(),
                            "echo deadline must be armed across the apply")
 
+    def test_remote_pause_republishes_the_paused_state(self):
+        # the supervisor sends the last snapshot it was fed, so applying a
+        # remote pause must feed it now: otherwise its next 1 Hz beat publishes
+        # the pre-pause snapshot, the relay adopts it (last-setBy wins) and the
+        # peer resumes - seen live as the browser pausing, resuming, pausing
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.on_state(self.remote(self.player.position, paused=True))
+        self.assertEqual(sup.sent[-1]["paused"], True,
+                         "the applied pause must be published at once")
+        self.assertEqual(sup.sent[-1]["doSeek"], False)
+
+    def test_remote_resume_republishes_the_resumed_state(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.paused = True
+        self.bridge.on_state(self.remote(self.player.position, paused=False))
+        self.assertEqual(sup.sent[-1]["paused"], False,
+                         "the applied resume must be published at once")
+
+    def test_remote_seek_republishes_the_target_position(self):
+        # a stale position in the snapshot would make the peer seek back
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        dialog = FakeDialog()
+        self.player.handler.dialog = dialog
+        target = self.player.position + 10
+        self.bridge.on_state(self.remote(target, paused=False))
+        self.assertEqual(dialog.seeks, [int(target * 1000)])
+        self.assertEqual(sup.sent[-1]["position"], target,
+                         "the applied seek must be published at once")
+        self.assertEqual(sup.sent[-1]["doSeek"], False)
+
+    def test_remote_pause_arms_the_pause_echo(self):
+        # only the matching kind is the echo: a resume inside the window is a
+        # real user action and must still reach the bridge
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.remote(self.player.position, paused=True))
+        self.assertEqual(self.player.wt_applied_kind, "pause")
+
+    def test_remote_resume_arms_the_play_echo(self):
+        self.player.paused = True
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.remote(self.player.position, paused=False))
+        self.assertEqual(self.player.wt_applied_kind, "play")
+
+    def test_remote_seek_arms_the_seek_echo(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.handler.dialog = FakeDialog()
+        self.bridge.on_state(self.remote(self.player.position + 10, paused=False))
+        self.assertEqual(self.player.wt_applied_kind, "seek")
+
     def test_remote_resume_applies(self):
         self.player.paused = True
         self.bridge.supervisor = FakeSupervisor()
@@ -1066,7 +1382,7 @@ class RemoteApplyTest(BridgeTestCase):
         self.assertEqual(self.player.seek_times, [target])
 
     def test_no_video_playback_is_left_alone(self):
-        self.player.video = False
+        self.player.video = None
         self.bridge.supervisor = FakeSupervisor()
         self.bridge.on_state(self.remote(0, paused=True))
         self.assertEqual(self.player.controls, [])
@@ -1076,6 +1392,181 @@ class RemoteApplyTest(BridgeTestCase):
         self.bridge.supervisor = FakeSupervisor()
         self.player.handler = object()      # no .dialog, attribute access raises
         self.bridge.on_state(self.remote(0, paused=True))   # must not raise
+
+
+class BufferingPeerTest(BridgeTestCase):
+    """The drift-seek gate: a slow or silent peer must not drag the host
+    backwards (2026-10-23 live session — the host was seeked back ~10 s on
+    every drift while the peer buffered)."""
+
+    def slow_peer(self, position, anchor_pos=0.0, anchor_age=9.0, do_seek=False):
+        """Fake a peer whose position advanced < 0.9x realtime over the anchor
+        window, so peer_slow() reports True."""
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge._peer_probe = (anchor_pos, time.monotonic() - anchor_age)
+        sup.session.remote = {"position": position, "paused": False,
+                              "doSeek": do_seek}
+
+    def state(self, position, do_seek=False):
+        return {"position": position, "paused": False, "doSeek": do_seek,
+                "setBy": syncplay.build_identity("d", "n", 1000002)}
+
+    def test_stale_peer_is_not_chased_backwards(self):
+        # a peer that has gone quiet must not drag the host back. The gate no
+        # longer consults peer_stale() (it is refreshed before the branch, so it
+        # is never true there); this stays as a regression guard for the rule.
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.peer_stale = lambda: True
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(40.0))
+        self.assertEqual(self.player.seek_times, [])
+
+    def test_a_healthy_peer_is_not_chased_backwards_either(self):
+        # 2026-10-23: peer_slow() flickers while a stuck peer wobbles by a
+        # second, and each "not slow" beat used to yank the host back 10-27 s.
+        # Nothing moves us backwards for drift now.
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge.peer_slow = lambda: False
+        self.bridge.peer_stale = lambda: False
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(20.0))          # 30 s behind us
+        self.assertEqual(self.player.seek_times, [])
+
+    def test_slow_peer_is_not_chased_backwards(self):
+        self.slow_peer(1.0)          # peer frozen near 0 while the host runs
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(1.0))
+        self.assertEqual(self.player.seek_times, [])
+
+    def test_slow_peer_with_a_forward_target_still_seeks(self):
+        # a peer ahead of us that is only advancing slowly: converging forward
+        # is legitimate and must not be gated
+        self.slow_peer(60.0, anchor_pos=55.0)   # 60 - 55 = 5 < 0.9 * 9: slow
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(60.0))
+        self.assertEqual(self.player.seek_times, [60.0])
+
+    def test_slow_peer_doseek_still_seeks(self):
+        # §5.6: an explicit seek command is applied regardless of the peer's
+        # buffering — the doSeek branch is not gated
+        self.slow_peer(40.0, do_seek=True)
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(40.0, do_seek=True))
+        self.assertEqual(self.player.seek_times, [40.0])
+
+    def test_gated_seek_leaves_drift_alone_on_the_next_beat(self):
+        # the live jolt was one seek per beat; a gated seek must not accumulate
+        self.slow_peer(1.0)
+        self.player.position = 50.0
+        self.bridge.on_state(self.state(1.0))
+        self.bridge.on_state(self.state(1.0))
+        self.assertEqual(self.player.seek_times, [])
+
+    def test_applied_drift_seek_toasts_once_then_dedupes(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.player.position = 50.0
+        remote = self.state(250.0)          # forward: the gate leaves it alone
+        self.bridge.on_state(remote)
+        self.assertEqual(self.toasts,
+                         [util.T(35095, "{} jumped to {}").format("Guest", "4:10")])
+        # a second correction inside 4 s: expire the seek cooldown so the seek
+        # applies, then assert the toast dedupe (not the cooldown) holds
+        self.bridge._remote_seek_at = 0.0
+        self.bridge.on_state(remote)
+        self.assertEqual(self.toasts,
+                         [util.T(35095, "{} jumped to {}").format("Guest", "4:10")])
+
+
+class ToastTest(BridgeTestCase):
+    """Event toasts: pause/resume/jump and join/leave, deduped per identity.
+
+    Toasts are always on (no setting). One toast per (identity, kind) per 4 s,
+    and nothing for a nameless/unparseable identity."""
+
+    def peer(self, user_id=1000002):
+        return syncplay.build_identity("d", "n", user_id)
+
+    def state(self, position=None, paused=False, do_seek=False, set_by=None):
+        return {"position": self.player.position if position is None
+                else position,
+                "paused": paused, "doSeek": do_seek,
+                "setBy": set_by if set_by is not None else self.peer()}
+
+    def test_pause_transition_toasts_once(self):
+        self.bridge.supervisor = FakeSupervisor()
+        remote = self.state(paused=True)
+        self.bridge.on_state(remote)
+        self.bridge.on_state(remote)   # a repeated identical state: no repeat
+        self.assertEqual(self.toasts, [util.T(35093, "{} paused").format("Guest")])
+
+    def test_resume_toasts(self):
+        self.player.paused = True
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.state(paused=False))
+        self.assertEqual(self.toasts, [util.T(35094, "{} resumed").format("Guest")])
+
+    def test_doseek_toasts_with_the_formatted_time(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.state(position=250.0, do_seek=True))
+        self.assertEqual(self.toasts, [
+            util.T(35095, "{} jumped to {}").format("Guest", "4:10")])
+
+    def test_join_and_leave_toast_with_the_peer_name(self):
+        self.bridge.supervisor = FakeSupervisor()
+        key = self.peer()
+        self.bridge.on_event("joined", key)
+        self.bridge.on_event("left", key)
+        self.assertEqual(self.toasts, [
+            util.T(35096, "{} joined the room").format("Guest"),
+            util.T(35097, "{} left the room").format("Guest")])
+
+    def test_our_own_events_never_toast(self):
+        # Self is filtered upstream in syncplay (is_self -> self_echo, on_state
+        # never fires; self "left" is advisory, on_event never fires), not in
+        # the bridge. Wire the bridge's real callbacks to a Session and feed
+        # self frames: nothing may toast.
+        ident = syncplay.build_identity("dev", "Me", 1000001)
+        self.bridge.supervisor = FakeSupervisor()
+        sess = syncplay.Session(room="r", identity=ident,
+                                on_state=self.bridge.on_state,
+                                on_event=self.bridge.on_event)
+        sess.on_message({"State": {
+            "ping": {"latencyCalculation": 1.0, "serverRtt": 0.1},
+            "playstate": {"position": 50.0, "paused": True, "doSeek": False,
+                          "setBy": ident + "_"}}})
+        sess.on_message({"Set": {"user": {ident: {
+            "room": {"name": "r"}, "event": {"left": True}}}}})
+        self.assertEqual(self.toasts, [])
+
+    def test_unparseable_identity_toasts_nothing(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.state(paused=True, set_by="not json"))
+        self.bridge.on_event("joined", "not json")
+        self.assertEqual(self.toasts, [])
+
+    def test_flapping_peer_toasts_once_within_4s_then_again_after(self):
+        self.bridge.supervisor = FakeSupervisor()
+        remote = self.state(paused=True)
+        self.bridge.on_state(remote)
+        self.assertEqual(len(self.toasts), 1)
+        self.bridge.on_state(remote)          # still inside the 4 s window
+        self.assertEqual(len(self.toasts), 1)
+        # back-date the stored stamp past the 4 s dedupe window
+        self.bridge._toasted[(wtwin.identity_user_id(self.peer()), "paused")] = \
+            time.monotonic() - 5.0
+        self.bridge.on_state(remote)
+        self.assertEqual(len(self.toasts), 2)
+
+    def test_toast_header_is_the_watch_together_title(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge.on_state(self.state(paused=True))
+        self.assertEqual(self.notifications[0][1],
+                         util.T(35053, "Watch Together"))
 
 
 class LifecycleTest(BridgeTestCase):
@@ -1292,18 +1783,309 @@ class PlaybackStartTest(BridgeTestCase):
         return watchtogether.Room(ROOM_JSON)
 
     def test_watch_room_skips_when_a_video_is_already_playing(self):
-        self.player.video = True
+        self.player.video = FakeVideo("227117")
         self.bridge._watch_room(self.room())   # must not start a new playback
         self.assertEqual(self.player.videos, [])
 
     def test_watch_room_without_a_source_server_does_nothing(self):
-        self.player.video = False
+        self.player.video = None
         # SERVERMANAGER is absent in tests: resolve yields nothing, no crash
         self.bridge._watch_room(self.room())
         self.assertEqual(self.player.videos, [])
 
     def test_room_media_item_returns_none_without_a_source_server(self):
         self.assertIsNone(self.bridge._room_media_item(self.room()))
+
+
+class DetectorBridgeTest(BridgeTestCase):
+    """_start_scan/_poll_detector/_cancel_detector: the host pre-scan gate.
+
+    The scan path resolution is best-effort and covered elsewhere; here we
+    patch p3i_detector (start/status/cancel) to drive the prepared-state
+    machine that gates host readiness until the job completes or fails open."""
+
+    def setUp(self):
+        super(DetectorBridgeTest, self).setUp()
+        self.bridge._hosting = True
+        self.bridge._detector_scan_path = lambda item: "/media/movie.mkv"
+        self._saved_start = wtwin.p3i_detector.start
+        self._saved_status = wtwin.p3i_detector.status
+        self._saved_cancel = wtwin.p3i_detector.cancel
+        self.start_calls = []
+        self.status_calls = []
+        self.cancel_calls = []
+        self.start_result = "job-1"
+        self.status_result = {"status": "completed"}
+        wtwin.p3i_detector.start = self._start
+        wtwin.p3i_detector.status = self._status
+        wtwin.p3i_detector.cancel = self._cancel
+
+    def tearDown(self):
+        wtwin.p3i_detector.start = self._saved_start
+        wtwin.p3i_detector.status = self._saved_status
+        wtwin.p3i_detector.cancel = self._saved_cancel
+        super(DetectorBridgeTest, self).tearDown()
+
+    def _start(self, path):
+        self.start_calls.append(path)
+        return self.start_result
+
+    def _status(self, requestid):
+        self.status_calls.append(requestid)
+        return self.status_result
+
+    def _cancel(self, requestid):
+        self.cancel_calls.append(("Cancel", {"requestid": requestid}))
+
+    def room(self, user_ids):
+        return watchtogether.Room({"users": [{"id": i, "title": str(i)}
+                                             for i in user_ids]})
+
+    def fire_ready(self, roster):
+        self.bridge.supervisor.session.roster = roster
+        self.bridge._on_ready(None, None)
+
+    def test_host_ready_held_until_scan_completes(self):
+        self.bridge._start_scan(object(), gate=True)
+        sup = FakeSupervisor()
+        self.bridge._update_ready(sup)
+        self.assertIs(sup.ready, False)
+        self.assertIs(self.bridge._player_ready, False)
+        self.status_result = {"status": "completed"}
+        self.bridge._poll_detector()
+        self.bridge._update_ready(sup)
+        self.assertIs(sup.ready, True)
+
+    def test_auto_start_does_not_fire_while_prepared_false(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._start_scan(object(), gate=True)
+        self.bridge._update_ready(sup)
+        self.bridge.room = self.room([1])
+        self.fire_ready({syncplay.build_identity("d", "n", 1): {"isReady": True}})
+        self.assertEqual(self.player.controls, [])
+
+    def test_scan_timeout_fails_open(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.bridge._detector_deadline = time.monotonic() - 1
+        self.status_result = {"status": "running"}
+        self.bridge._poll_detector()
+        self.assertTrue(self.bridge._prepared)
+        self.assertIsNone(self.bridge._detector_requestid)
+        # the zombie scan is cancelled, not just forgotten: otherwise it holds
+        # the shared p3i scanner reservation until the server reaps it
+        self.assertIn(("Cancel", {"requestid": "job-1"}), self.cancel_calls)
+
+    def test_non_completed_terminal_status_fails_open(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.status_result = {"status": "failed"}
+        self.bridge._poll_detector()
+        self.assertTrue(self.bridge._prepared)
+        self.assertIsNone(self.bridge._detector_requestid)
+
+    def test_completed_scan_stores_requestid_on_player(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.status_result = {"status": "completed"}
+        self.bridge._poll_detector()
+        self.assertEqual(self.player.wt_detector_requestid, "job-1")
+
+    def test_late_result_after_leave_is_ignored(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.bridge._detector_requestid = None
+        self.status_result = {"status": "completed"}
+        self.bridge._poll_detector()
+        self.assertIsNone(self.player.wt_detector_requestid)
+
+    def test_leave_cancels_the_job(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.bridge.leave()
+        self.assertIn(("Cancel", {"requestid": "job-1"}), self.cancel_calls)
+        self.assertTrue(self.bridge._prepared)
+
+    def test_disconnect_cancels_the_job(self):
+        self.bridge._start_scan(object(), gate=True)
+        self.bridge.disconnect()
+        self.assertIn(("Cancel", {"requestid": "job-1"}), self.cancel_calls)
+        self.assertIsNone(self.bridge._detector_requestid)
+        self.assertTrue(self.bridge._prepared)
+
+    def test_teardown_clears_the_detector_job_on_the_player(self):
+        self.player.wt_detector_requestid = "job-1"
+        self.player.wt_detector_part_index = 0
+        self.bridge.disconnect()
+        self.assertIsNone(self.player.wt_detector_requestid)
+        self.assertEqual(self.player.wt_detector_part_index, 0)
+
+
+class FakePart(object):
+    """Part surface _detector_scan_path reads: getPathMappedUrl/getAbsolutePath."""
+
+    def __init__(self, mapped=None, key="1"):
+        self._mapped = mapped
+        self._key = key
+
+    def getPathMappedUrl(self):
+        return self._mapped
+
+    def getAbsolutePath(self, kind):
+        assert kind == "key"
+        return "/library/parts/{0}".format(self._key)
+
+    def getSelectedStreamOfType(self, *args, **kwargs):
+        return None
+
+    def isAccessible(self):
+        return True
+
+
+class FakeMedia(object):
+    """Media surface plexnet.MediaChoice reads: parts + indirectHeaders."""
+
+    def __init__(self, part):
+        self.parts = [part]
+        self.indirectHeaders = {}
+
+
+class FakeChoice(object):
+    """A mediaChoice stand-in: only .part is read by the resolver."""
+
+    def __init__(self, part):
+        self.part = part
+
+
+class ScanServer(object):
+    def __init__(self):
+        self.builds = []
+
+    def buildUrl(self, path, includeToken=False):
+        self.builds.append((path, includeToken))
+        return "https://plex.test" + path
+
+
+class ScanItem(object):
+    """Item surface _detector_scan_path reads: mediaChoice, media(), getServer()."""
+
+    def __init__(self, media_choice=None, media_list=None, server=None):
+        self.mediaChoice = media_choice
+        self._media = media_list or []
+        self._server = server
+
+    def media(self):
+        return self._media
+
+    def getServer(self):
+        return self._server
+
+
+class DetectorScanPathTest(BridgeTestCase):
+    """_detector_scan_path: the sole Direct Play URI resolver for the pre-scan.
+
+    Stubbed in every bridge test above, so its branches need direct coverage:
+    a regression returning None would silently disable the whole feature."""
+
+    def test_mapped_path_wins(self):
+        part = FakePart(mapped="/media/movie.mkv")
+        item = ScanItem(media_choice=FakeChoice(part), server=ScanServer())
+        self.assertEqual(self.bridge._detector_scan_path(item), "/media/movie.mkv")
+
+    def test_falls_back_to_the_server_key_url(self):
+        part = FakePart(mapped=None)
+        server = ScanServer()
+        item = ScanItem(media_choice=FakeChoice(part), server=server)
+        self.assertEqual(self.bridge._detector_scan_path(item),
+                         "https://plex.test/library/parts/1")
+        self.assertEqual(server.builds, [("/library/parts/1", True)],
+                         "buildUrl must be called with the part's key and the token")
+
+    def test_media_choice_none_falls_back_to_part_0(self):
+        part = FakePart(mapped="/media/movie.mkv")
+        media = FakeMedia(part)
+        item = ScanItem(media_choice=None, media_list=[media], server=ScanServer())
+        self.assertEqual(self.bridge._detector_scan_path(item), "/media/movie.mkv")
+
+    def test_empty_path_is_none(self):
+        # buildUrl returning "" must not slip _start_scan's `path is None` guard
+        part = FakePart(mapped=None)
+        server = ScanServer()
+        server.buildUrl = lambda path, includeToken=False: ""
+        item = ScanItem(media_choice=FakeChoice(part), server=server)
+        self.assertIsNone(self.bridge._detector_scan_path(item))
+
+    def test_raising_part_is_none(self):
+        class BoomPart(object):
+            def getPathMappedUrl(self):
+                raise RuntimeError("boom")
+        item = ScanItem(media_choice=FakeChoice(BoomPart()), server=ScanServer())
+        self.assertIsNone(self.bridge._detector_scan_path(item))
+
+
+class GuestScanTest(BridgeTestCase):
+    """room_clicked's guest branch: a best-effort pre-scan that never gates
+    readiness (gate=False), never blocks the join, and is abandoned if the room
+    starts first (nothing binds to the player)."""
+
+    def setUp(self):
+        super(GuestScanTest, self).setUp()
+        self.bridge._detector_scan_path = lambda item: "/media/movie.mkv"
+        self._saved_start = wtwin.p3i_detector.start
+        self._saved_status = wtwin.p3i_detector.status
+        self.start_calls = []
+        self.status_calls = []
+        self.start_result = "job-1"
+        self.status_result = {"status": "running"}
+        wtwin.p3i_detector.start = self._start
+        wtwin.p3i_detector.status = self._status
+
+    def tearDown(self):
+        wtwin.p3i_detector.start = self._saved_start
+        wtwin.p3i_detector.status = self._saved_status
+        super(GuestScanTest, self).tearDown()
+
+    def _start(self, path):
+        self.start_calls.append(path)
+        getattr(self, "events", []).append("scan")
+        return self.start_result
+
+    def _status(self, requestid):
+        self.status_calls.append(requestid)
+        return self.status_result
+
+    def _click(self, item):
+        """Run room_clicked down the guest branch: a guest not yet in the room
+        clicks an unstarted room tile. The join/takeover steps are side-stepped
+        (not the behaviour under test)."""
+        self.events = []
+        self.bridge._room_media_item = lambda room: self.events.append("media") or item
+        self.bridge._open_lobby = lambda host=False: self.events.append(("lobby", host))
+        self.bridge._watch_room = lambda room: self.events.append("watch")
+        self.bridge._join_or_switch = lambda room_id, leave_first: self.events.append("join")
+        self.bridge.supervisor = None
+        self.bridge._room_unstarted = lambda: True
+        self.player.video = None          # nothing playing -> no takeover prompt
+        self.bridge.room_clicked(watchtogether.Room(ROOM_JSON))
+        return self.events
+
+    def test_guest_resolves_item_before_lobby_and_scans(self):
+        events = self._click(FakeItem())
+        self.assertTrue(self.start_calls, "the guest scan must start")
+        self.assertIs(self.bridge._prepared, True,
+                      "guest scan never gates readiness")
+        self.assertLess(events.index("media"), events.index("scan"),
+                        "resolve the item before scanning")
+        self.assertLess(events.index("scan"), events.index(("lobby", False)),
+                        "scan before opening the lobby")
+        self.assertEqual(events, ["join", "media", "scan", ("lobby", False),
+                                  "watch"])
+
+    def test_guest_scan_abandons_on_start(self):
+        # the guest's best-effort scan is still running when the room starts:
+        # nothing completed, so nothing binds to the player (no bind => no block)
+        self._click(FakeItem())
+        self.assertTrue(self.start_calls, "the guest scan must have started")
+        self.bridge._poll_detector()          # the tick, mid-scan
+        self.assertIsNone(self.player.wt_detector_requestid)
+        self.assertIs(self.bridge._prepared, True,
+                      "an abandoned scan still leaves readiness un-gated")
 
 
 class LocalChangeGraceTest(BridgeTestCase):
@@ -1372,17 +2154,39 @@ class TempoTest(BridgeTestCase):
         self.assertEqual(calls, [(1, 0.95), (1, 1.0)], "slow then reset")
         self.assertEqual(self.player.seek_times, [], "tempo needs no seek")
 
-    def test_old_kodi_degrades_to_a_seek(self):
-        saved_major = wtwin.util.KODI_VERSION_MAJOR
-        wtwin.util.KODI_VERSION_MAJOR = 20
+    def test_teardown_restores_normal_tempo(self):
+        # leaving via the OSD keeps the video running; a catch-up must not
+        # leave it slowed after sync has ended
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
         try:
             self.bridge.supervisor = FakeSupervisor()
-            self.bridge.on_state(self.tempo_state(2.0))
+            self.bridge.on_state(self.tempo_state(2.0))   # applies 0.95
+            self.assertEqual(self.bridge._tempo, 0.95)
+            self.bridge.disconnect()
         finally:
-            wtwin.util.KODI_VERSION_MAJOR = saved_major
-        self.assertEqual(self.player.seek_times, [self.player.position - 2.0])
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertIn((1, 1.0), calls, "normal tempo restored on teardown")
+        self.assertEqual(self.bridge._tempo, 1.0)
 
-    def test_set_tempo_failure_degrades_to_a_seek(self):
+    def test_old_kodi_widens_the_tolerance(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 20
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))    # 2s ahead: no seek
+            self.assertEqual(self.player.seek_times, [], "2s drift must not seek")
+            self.bridge.on_state(self.tempo_state(-10.0))  # 10s behind: wide enough
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(self.player.seek_times, [self.player.position + 10.0])
+        self.assertEqual(calls, [], "no SetTempo RPC on old Kodi")
+
+    def test_set_tempo_failure_does_not_seek(self):
         saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
         wtwin.util.KODI_VERSION_MAJOR = 21
         wtwin.util.rpc = self.patch_rpc([], fail=True)
@@ -1391,7 +2195,8 @@ class TempoTest(BridgeTestCase):
             self.bridge.on_state(self.tempo_state(2.0))
         finally:
             wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
-        self.assertEqual(self.player.seek_times, [self.player.position - 2.0])
+        self.assertEqual(self.player.seek_times, [],
+                         "a tempo failure must not degrade into a seek")
 
     def test_set_tempo_failure_backs_off_without_spam(self):
         saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
@@ -1405,7 +2210,7 @@ class TempoTest(BridgeTestCase):
         finally:
             wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
         self.assertEqual(len(calls), 1, "must not hammer a failing SetTempo")
-        self.assertEqual(len(self.player.seek_times), 2, "still hard-seeks")
+        self.assertEqual(self.player.seek_times, [], "a tempo failure must not seek")
 
     def test_tempo_is_skipped_while_seeking(self):
         saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
@@ -1439,6 +2244,262 @@ class TempoTest(BridgeTestCase):
         self.assertEqual(calls, [(1, 0.95)])
         self.assertEqual(self.player.seek_times, [])
 
+    def test_two_failures_mark_tempo_unavailable(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls, fail=True)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))   # failure 1
+            self.bridge._tempo_retry_at = 0.0             # expire the backoff
+            self.bridge.on_state(self.tempo_state(2.0))   # failure 2 -> unavailable
+            self.assertTrue(self.bridge._tempo_unavailable,
+                            "two failures must mark tempo unavailable")
+            self.bridge.on_state(self.tempo_state(5.0))   # 5s drift: no seek
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(self.player.seek_times, [],
+                         "a 5s drift must not seek once tempo is unavailable")
+
+    def test_first_refusal_already_widens_the_tolerance(self):
+        # a player that refuses SetTempo must not get seeks for a 4-10s drift
+        # while the second probe is still 60s away (2026-10-23 seek burst)
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls, fail=True)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge.on_state(self.tempo_state(2.0))   # failure 1 only
+            self.bridge.on_state(self.tempo_state(5.0))   # 5s drift: no seek
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertFalse(self.bridge._tempo_unavailable, "still only one failure")
+        self.assertEqual(self.player.seek_times, [],
+                         "one refusal must already widen the tolerance")
+        self.assertEqual(len(calls), 1, "the backoff still holds the retry")
+
+    def test_no_seek_while_seeking_or_caching(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            ENV.cond_visibility["Player.Seeking"] = True
+            self.bridge.on_state(self.tempo_state(5.0))   # would seek
+            self.assertEqual(self.player.seek_times, [])
+            ENV.cond_visibility.pop("Player.Seeking", None)
+            ENV.cond_visibility["Player.Caching"] = True
+            self.bridge.on_state(self.tempo_state(5.0))   # would seek
+            self.assertEqual(self.player.seek_times, [])
+        finally:
+            ENV.cond_visibility.pop("Player.Seeking", None)
+            ENV.cond_visibility.pop("Player.Caching", None)
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+
+    def test_remote_seek_is_rate_limited(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge._remote_seek_at = time.monotonic()  # a seek just happened
+            self.bridge.on_state(self.tempo_state(-5.0))    # forward: we are behind
+            self.assertEqual(self.player.seek_times, [],
+                             "cooldown must suppress the next seek")
+            self.bridge._remote_seek_at = time.monotonic() - wtwin.WT_SEEK_COOLDOWN
+            self.bridge.on_state(self.tempo_state(-5.0))
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(self.player.seek_times, [self.player.position + 5.0])
+
+    def test_seek_apply_publishes_the_target(self):
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        sup = FakeSupervisor()
+        try:
+            self.bridge.supervisor = sup
+            self.bridge.on_state(self.tempo_state(-5.0))  # forward drift -> seek
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(sup.sent,
+                         [{"position": self.player.position + 5.0,
+                           "paused": False, "doSeek": False}])
+
+    def test_pause_is_published_even_when_the_seek_is_blocked(self):
+        sup = FakeSupervisor()
+        try:
+            self.bridge.supervisor = sup
+            ENV.cond_visibility["Player.Seeking"] = True
+            self.bridge.on_state({
+                "position": self.player.position,
+                "paused": True,          # pause transition: player is not paused
+                "doSeek": True,          # and the room asks for a seek (blocked)
+                "setBy": "other-identity",
+            })
+        finally:
+            ENV.cond_visibility.pop("Player.Seeking", None)
+        self.assertEqual(self.player.controls, ["pause"],
+                         "the pause must still be applied")
+        self.assertEqual(self.player.seek_times, [],
+                         "the blocked seek must not fire")
+        self.assertEqual(sup.sent,
+                         [{"position": self.player.position,
+                           "paused": True, "doSeek": False}],
+                         "the applied pause must still be published")
+
+
+class PauseCatchupTest(BridgeTestCase):
+    """Optional pause-based catch-up for players without tempo (§6.2 alt).
+
+    Only reached once _tempo_unavailable is True (Kodi < 21 or SetTempo
+    refused twice); the freeze is local and must never be broadcast."""
+
+    def state(self, delta, paused=False):
+        return {"position": self.player.position - delta, "paused": paused,
+                "doSeek": False, "setBy": "other-identity"}
+
+    def test_setting_off_leaves_the_drift_alone(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._tempo_unavailable = True
+        self.player.position = 52.0        # 2 s ahead of the room at 50
+        self.bridge.on_state(self.state(2.0))
+        self.assertEqual(self.player.controls, [],
+                         "the setting is off: no pause must be applied")
+        self.assertEqual(self.bridge._catchup_until, 0.0)
+
+    def test_two_seconds_ahead_pauses_without_broadcasting(self):
+        util.setSetting("watchtogether.pause_catchup", "true")
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge._tempo_unavailable = True
+        self.player.position = 52.0
+        self.bridge.on_state(self.state(2.0))
+        self.assertEqual(self.player.controls, ["pause"])
+        self.assertEqual(self.player.wt_applied_kind, "pause")
+        self.assertGreater(self.bridge._catchup_until, 0.0,
+                           "the freeze deadline is armed")
+        self.assertEqual(sup.sent, [], "the local freeze must not be broadcast")
+
+    def test_beat_inside_the_window_is_inert(self):
+        util.setSetting("watchtogether.pause_catchup", "true")
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._tempo_unavailable = True
+        self.player.position = 52.0
+        self.bridge.on_state(self.state(2.0))       # arms the freeze
+        self.player.controls = []
+        self.bridge.on_state(self.state(2.0))       # still inside the window
+        self.assertEqual(self.player.controls, [],
+                         "no control while the catch-up pause is pending")
+
+    def test_deadline_resume_plays_with_the_echo_gate(self):
+        util.setSetting("watchtogether.pause_catchup", "true")
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._tempo_unavailable = True
+        self.bridge._catchup_until = time.monotonic() - 1.0   # deadline passed
+        self.player.position = 50.0                           # now caught up
+        self.bridge.on_state(self.state(0.0))
+        self.assertIn("play", self.player.controls)
+        self.assertEqual(self.player.wt_applied_kind, "play")
+        self.assertEqual(self.bridge._catchup_until, 0.0,
+                         "the deadline is cleared once it passes")
+
+    def test_pending_freeze_cleared_when_playback_stops(self):
+        util.setSetting("watchtogether.pause_catchup", "true")
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._tempo_unavailable = True
+        # expired, not future: without the fix the next playing beat would see
+        # it in the past, resume, and issue a spurious play on the new video
+        self.bridge._catchup_until = time.monotonic() - 1.0
+        # a beat while no video is playing: the freeze must be cleared
+        self.player.video = None
+        self.bridge.on_state(self.state(0.0))
+        self.assertEqual(self.bridge._catchup_until, 0.0,
+                         "stopping playback clears a pending catch-up pause")
+        self.assertEqual(self.player.controls, [],
+                         "no resume is issued while there is no video")
+        # a fresh video, room paused: no stale play must leak onto it
+        self.player.video = FakeVideo("227117")
+        self.bridge.on_state({"position": 50.0, "paused": True,
+                              "doSeek": False, "setBy": "other-identity"})
+        self.assertNotIn("play", self.player.controls,
+                         "a cleared freeze must not resume the next video")
+
+    def patch_rpc(self, calls):
+        class RPCPlayer(object):
+            def GetActivePlayers(self):
+                return [{"playerid": 1, "type": "video"}]
+
+            def SetTempo(self, playerid, tempo):
+                calls.append((playerid, tempo))
+
+        class RPC(object):
+            Player = RPCPlayer()
+        return RPC()
+
+    def test_tempo_band_drift_is_a_no_op_without_tempo(self):
+        # a tempo-band drift on a tempo-less player must neither SetTempo nor
+        # seek (the band is "leave it", and the per-beat log reports action=None)
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge._tempo_unavailable = True
+            self.player.position = 52.0        # 2 s ahead of the room at 50
+            self.bridge.on_state(self.state(2.0))
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(calls, [], "no SetTempo when tempo is unavailable")
+        self.assertEqual(self.player.seek_times, [], "and no seek either")
+        self.assertEqual(self.player.controls, [],
+                         "setting off: the drift is left alone")
+
+    def test_tempo_band_drift_still_runs_the_catchup_pause(self):
+        util.setSetting("watchtogether.pause_catchup", "true")
+        saved_major, saved_rpc = wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc
+        calls = []
+        wtwin.util.KODI_VERSION_MAJOR = 21
+        wtwin.util.rpc = self.patch_rpc(calls)
+        try:
+            self.bridge.supervisor = FakeSupervisor()
+            self.bridge._tempo_unavailable = True
+            self.player.position = 52.0
+            self.bridge.on_state(self.state(2.0))
+        finally:
+            wtwin.util.KODI_VERSION_MAJOR, wtwin.util.rpc = saved_major, saved_rpc
+        self.assertEqual(calls, [], "no SetTempo when tempo is unavailable")
+        self.assertEqual(self.player.seek_times, [], "and no seek either")
+        self.assertEqual(self.player.controls, ["pause"],
+                         "the opt-in catch-up pause is still applied")
+
+
+class DisplayNameTest(BridgeTestCase):
+    def test_resolves_through_participants_title(self):
+        key = syncplay.build_identity("d", "n", 1000001)
+        self.assertEqual(self.bridge.display_name(key), "Owner")
+
+    def test_falls_back_to_username(self):
+        self.bridge.room = watchtogether.Room(dict(
+            ROOM_JSON, users=[{"id": 1000001, "username": "owner"}]))
+        key = syncplay.build_identity("d", "n", 1000001)
+        self.assertEqual(self.bridge.display_name(key), "owner")
+
+    def test_falls_back_to_device_name_when_no_participant_matches(self):
+        key = syncplay.build_identity("d", "Bedroom Kodi", 999)
+        self.assertEqual(self.bridge.display_name(key), "Bedroom Kodi")
+
+    def test_returns_empty_when_neither_exists(self):
+        self.assertEqual(self.bridge.display_name(None), "")
+        key = syncplay.build_identity("d", "", 999)   # no participant, no name
+        self.assertEqual(self.bridge.display_name(key), "")
+
 
 class SourceUriTest(KodiTestCase):
     """parse_source_uri: the room sourceUri -> (machine, ratingKey) mapping
@@ -1469,6 +2530,78 @@ class SourceUriTest(KodiTestCase):
         self.assertEqual(wtwin.parse_source_uri("server://abc/other"), (None, None))
         self.assertEqual(wtwin.parse_source_uri(""), (None, None))
         self.assertEqual(wtwin.parse_source_uri(None), (None, None))
+
+
+class SupervisorGuardTest(BridgeTestCase):
+    """A callback from a stopped supervisor must not touch the bridge.
+
+    stop() waits ≤5 s but a room REST can take 15 s, so an old supervisor can
+    deliver after another room has been joined."""
+
+    def test_stale_roster_callback_is_ignored(self):
+        old, new = FakeSupervisor(), FakeSupervisor()
+        self.bridge.supervisor = new
+        calls = []
+        self.bridge.on_roster = lambda room: calls.append(room)
+        self.bridge._sup_guard(old, self.bridge.on_roster,
+                               watchtogether.Room({"id": "old"}))
+        self.assertEqual(calls, [], "a stale supervisor's roster must not apply")
+        self.bridge._sup_guard(new, self.bridge.on_roster,
+                               watchtogether.Room({"id": "new"}))
+        self.assertEqual(len(calls), 1)
+
+    def test_stale_state_callback_is_ignored(self):
+        old, new = FakeSupervisor(), FakeSupervisor()
+        self.bridge.supervisor = new
+        calls = []
+        self.bridge.on_state = lambda remote: calls.append(remote)
+        self.bridge._sup_guard(old, self.bridge.on_state, {"position": 1.0})
+        self.assertEqual(calls, [])
+
+
+class PlaybackOwnershipTest(BridgeTestCase):
+    """The sync gates: only the room's own item may be synced.
+
+    isPlayingVideo() is true for any video; with auto-join the bridge is
+    connected before room playback, so an unrelated movie must not be
+    paused/seeked by room States nor have its position published."""
+
+    def remote(self, position=100.0, paused=True):
+        return {"position": position, "paused": paused, "doSeek": False,
+                "setBy": "other-identity"}
+
+    def test_unrelated_video_is_not_controlled_by_room_states(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.video = FakeVideo("999")     # not the room's item
+        self.bridge.on_state(self.remote())
+        self.assertEqual(self.player.controls, [], "no pause/play applied")
+        self.assertEqual(self.player.seek_times, [], "no seek applied")
+
+    def test_unrelated_video_position_is_not_published(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = FakeVideo("999")
+        self.player.position = 12.0
+        self.bridge.push_local()
+        self.assertEqual(sup.sent[-1]["position"],
+                         int(sup.session.remote.get("position", 0)),
+                         "echoes the room position, not the unrelated video")
+
+    def test_room_item_is_synced(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.video = FakeVideo("227117")
+        self.bridge.on_state(self.remote(position=50.0))
+        self.assertEqual(self.player.controls, ["pause"])
+
+    def test_ready_requires_the_room_item(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.player.video = FakeVideo("999")
+        self.bridge._update_ready(sup)
+        self.assertFalse(self.bridge._player_ready)
+        self.player.video = FakeVideo("227117")
+        self.bridge._update_ready(sup)
+        self.assertTrue(self.bridge._player_ready)
 
 
 class TakeoverConfirmTest(BridgeTestCase):
@@ -1508,3 +2641,278 @@ class TakeoverConfirmTest(BridgeTestCase):
         ENV.dialog_calls.clear()
         self.assertTrue(wtwin.confirm_takeover(self.room()))
         self.assertEqual(ENV.dialog_calls, [])
+
+
+class MemberStateTest(KodiTestCase):
+    """member_state: the participant status truth table (Task 2)."""
+
+    def test_truth_table(self):
+        self.assertEqual(wtwin.member_state(False, True), wtwin.STATUS_INVITED)
+        self.assertEqual(wtwin.member_state(False, None), wtwin.STATUS_INVITED)
+        self.assertEqual(wtwin.member_state(False, False), wtwin.STATUS_INVITED)
+        self.assertEqual(wtwin.member_state(True, None), wtwin.STATUS_JOINING)
+        self.assertEqual(wtwin.member_state(True, False), wtwin.STATUS_BUFFERING)
+        self.assertEqual(wtwin.member_state(True, True, stale=True),
+                         wtwin.STATUS_BUFFERING)
+        self.assertEqual(wtwin.member_state(True, True, slow=True),
+                         wtwin.STATUS_BUFFERING)
+        self.assertEqual(wtwin.member_state(True, True), wtwin.STATUS_WATCHING)
+
+    def test_state_label(self):
+        self.assertEqual(wtwin.state_label(wtwin.STATUS_INVITED, "R"),
+                         util.T(35076, "Invited"))
+        self.assertEqual(wtwin.state_label(wtwin.STATUS_JOINING, "R"),
+                         util.T(35092, "Joining"))
+        self.assertEqual(wtwin.state_label(wtwin.STATUS_BUFFERING, "R"),
+                         util.T(35091, "Buffering"))
+        self.assertEqual(wtwin.state_label(wtwin.STATUS_WATCHING, "R"), "R")
+
+
+class LobbyRowsStatusTest(KodiTestCase):
+    """lobby_rows with state_for: the richer status set."""
+
+    def room(self, users):
+        return watchtogether.Room({"users": users})
+
+    def roster(self):
+        return {
+            syncplay.build_identity("d", "n", 1): {"isReady": True},
+            syncplay.build_identity("d", "n", 2): {"isReady": None},
+            syncplay.build_identity("d", "n", 3): {"isReady": False},
+            # id 4 is absent: invited (not on the roster)
+        }
+
+    def test_full_status_set(self):
+        room = self.room([{"id": 1, "title": "A"}, {"id": 2, "title": "B"},
+                          {"id": 3, "title": "C"}, {"id": 4, "title": "D"}])
+        rows = wtwin.lobby_rows(room, self.roster(),
+                                state_for=lambda uid: (False, False))
+        self.assertEqual([r["status"] for r in rows],
+                         [util.T(35075, "Ready"), util.T(35092, "Joining"),
+                          util.T(35091, "Buffering"), util.T(35076, "Invited")])
+
+    def test_stale_peer_shows_buffering(self):
+        room = self.room([{"id": 1, "title": "A"}])
+        rows = wtwin.lobby_rows(room, self.roster(),
+                                state_for=lambda uid: (True, False))
+        self.assertEqual([r["status"] for r in rows],
+                         [util.T(35091, "Buffering")])
+
+    def test_no_state_for_keeps_old_behaviour(self):
+        room = self.room([{"id": 1, "title": "A"}, {"id": 4, "title": "D"}])
+        rows = wtwin.lobby_rows(room, self.roster())
+        self.assertEqual([r["status"] for r in rows],
+                         [util.T(35075, "Ready"), util.T(35076, "Invited")])
+
+
+class PeerHeuristicsTest(BridgeTestCase):
+    """peer_stale/peer_slow: the staleness heuristics (Task 2)."""
+
+    def test_peer_stale_after_five_seconds(self):
+        self.assertFalse(self.bridge.peer_stale())
+        self.bridge._last_remote_state_at = time.monotonic()
+        self.assertFalse(self.bridge.peer_stale())
+        self.bridge._last_remote_state_at = time.monotonic() - 6.0
+        self.assertTrue(self.bridge.peer_stale())
+
+    def test_apply_remote_records_the_state_heartbeat(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.player.video = None      # early return, but past the checks
+        self.bridge.on_state({"position": 0.0, "paused": True,
+                              "doSeek": False, "setBy": "other-identity"})
+        self.assertGreater(self.bridge._last_remote_state_at, 0.0)
+        self.assertFalse(self.bridge.peer_stale())
+
+    def test_peer_slow_only_for_two_participants(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)   # 2 users
+        sup.session.remote = {"position": 1.0, "paused": False}
+        self.bridge._peer_probe = (0.0, time.monotonic() - 9.0)
+        self.assertTrue(self.bridge.peer_slow())
+        self.bridge.room = watchtogether.Room(dict(
+            ROOM_JSON, users=ROOM_JSON["users"] + [{"id": 3, "username": "x"}]))
+        self.assertFalse(self.bridge.peer_slow())
+        self.assertIsNone(self.bridge._peer_probe,
+                          "a member join/leave must drop the anchor")
+
+    def test_backward_jump_is_not_slow(self):
+        # a peer's 30 s rewind drops the remote position; without re-anchoring
+        # the fixed anchor keeps pos-anchor below 0.9x elapsed for ~10x the jump
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        sup.session.remote = {"position": 100.0, "paused": False, "doSeek": False}
+        self.bridge._peer_probe = (100.0, time.monotonic() - 9.0)
+        sup.session.remote = {"position": 70.0, "paused": False, "doSeek": False}
+        self.assertFalse(self.bridge.peer_slow())
+        self.assertEqual(self.bridge._peer_probe[0], 70.0)
+
+    def test_do_seek_is_not_slow(self):
+        # an explicit seek command (even to the same position) re-anchors the
+        # probe so the seek is not read as buffering
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        sup.session.remote = {"position": 100.0, "paused": False, "doSeek": False}
+        self.bridge._peer_probe = (100.0, time.monotonic() - 9.0)
+        sup.session.remote = {"position": 100.0, "paused": False, "doSeek": True}
+        self.assertFalse(self.bridge.peer_slow())
+
+    def test_advancing_position_is_not_slow(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        sup.session.remote = {"position": 9.0, "paused": False}
+        self.bridge._peer_probe = (0.0, time.monotonic() - 9.0)
+        self.assertFalse(self.bridge.peer_slow())   # 9.0 >= 0.9 * 9.0
+
+    def test_peer_slow_requires_eight_seconds(self):
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        sup.session.remote = {"position": 1.0, "paused": False}
+        self.bridge._peer_probe = (0.0, time.monotonic() - 7.0)
+        self.assertFalse(self.bridge.peer_slow())
+
+    def test_paused_room_is_not_slow(self):
+        # a paused room freezes position; that is the normal non-slow state,
+        # not buffering — even after the slow window has elapsed
+        sup = FakeSupervisor()
+        self.bridge.supervisor = sup
+        self.bridge.room = watchtogether.Room(ROOM_JSON)   # 2 participants
+        sup.session.remote = {"position": 5.0, "paused": True}
+        self.bridge._peer_probe = (0.0, time.monotonic() - 9.0)   # window gone
+        self.assertFalse(self.bridge.peer_slow(),
+                         "a paused room must not read as buffering")
+        self.assertIsNone(self.bridge._peer_probe,
+                          "the anchor resets so a resume is not flagged slow")
+
+    def test_peer_state_reset_on_disconnect(self):
+        self.bridge.supervisor = FakeSupervisor()
+        self.bridge._last_remote_state_at = time.monotonic()
+        self.bridge._peer_probe = (0.0, time.monotonic())
+        self.bridge.disconnect()
+        self.assertEqual(self.bridge._last_remote_state_at, 0.0)
+        self.assertIsNone(self.bridge._peer_probe)
+
+    def _as_account(self, account_id):
+        """Point plexapp.ACCOUNT at a minimal account with the given id."""
+        saved = wtwin.plexapp.ACCOUNT
+        class Account(object):
+            ID = account_id
+        wtwin.plexapp.ACCOUNT = Account()
+        self.addCleanup(setattr, wtwin.plexapp, "ACCOUNT", saved)
+        return saved
+
+    def test_own_row_has_no_special_case(self):
+        # the peer-only heuristics return (False, False) for our own user id,
+        # even when the peer is stale, and still apply to the peer's row
+        self._as_account(1000001)
+        self.bridge.room = watchtogether.Room(ROOM_JSON)   # self 1000001 + peer
+        self.bridge._last_remote_state_at = time.monotonic() - 6.0   # peer stale
+        self.assertEqual(self.bridge._participant_state("1000001"),
+                         (False, False))
+        self.assertEqual(self.bridge._participant_state("1000002"),
+                         (True, False))
+
+    def test_peer_stale_keeps_own_row_watching(self):
+        # two-member room, peer stalled: our own row stays "Watching", the
+        # peer's shows "Buffering"
+        self._as_account(1000001)
+        self.bridge.room = watchtogether.Room(ROOM_JSON)
+        self.bridge._last_remote_state_at = time.monotonic() - 6.0   # peer stale
+        roster = {
+            syncplay.build_identity("d", "n", 1000001): {"isReady": True},
+            syncplay.build_identity("d", "n", 1000002): {"isReady": True},
+        }
+        watching = util.T(35090, "Watching")
+        self.assertEqual(
+            wtwin.member_state_label("1000001", roster,
+                                     self.bridge._participant_state, watching),
+            watching)
+        self.assertEqual(
+            wtwin.member_state_label("1000002", roster,
+                                     self.bridge._participant_state, watching),
+            util.T(35091, "Buffering"))
+
+
+class ParticipantsDialogStatusTest(KodiTestCase):
+    """ParticipantsDialog: label2 becomes the status label (Task 2)."""
+
+    class FakeList(object):
+        def __init__(self):
+            self.items = []
+
+        def reset(self):
+            self.items = []
+
+        def addItems(self, items):
+            self.items += items
+
+    def setUp(self):
+        super(ParticipantsDialogStatusTest, self).setUp()
+        self._saved_room = wtwin.bridge.room
+        self._saved_sup = wtwin.bridge.supervisor
+
+    def tearDown(self):
+        wtwin.bridge.room = self._saved_room
+        wtwin.bridge.supervisor = self._saved_sup
+        super(ParticipantsDialogStatusTest, self).tearDown()
+
+    def test_sync_shows_status_labels(self):
+        wtwin.bridge.room = watchtogether.Room({
+            "users": [{"id": 1000001, "username": "owner", "title": "Owner"},
+                      {"id": 1000002, "username": "guest", "title": "Guest"}]})
+        sup = FakeSupervisor()
+        sup.session.roster = {
+            syncplay.build_identity("d", "n", 1000001): {"isReady": True},
+            syncplay.build_identity("d", "n", 1000002): {"isReady": False},
+        }
+        wtwin.bridge.supervisor = sup
+        d = wtwin.ParticipantsDialog()
+        d.peopleList = self.FakeList()
+        d._key = None
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items],
+                         ["Owner", "Guest"])
+        self.assertEqual([i.label2 for i in d.peopleList.items],
+                         [util.T(35090, "Watching"),
+                          util.T(35091, "Buffering")])
+
+
+class RoomInfoDialogStatusTest(KodiTestCase):
+    """RoomInfoDialog: no supervisor -> old username rows, not "Invited"."""
+
+    class FakeList(object):
+        def __init__(self):
+            self.items = []
+
+        def reset(self):
+            self.items = []
+
+        def addItems(self, items):
+            self.items += items
+
+    def setUp(self):
+        super(RoomInfoDialogStatusTest, self).setUp()
+        self._saved_sup = wtwin.bridge.supervisor
+
+    def tearDown(self):
+        wtwin.bridge.supervisor = self._saved_sup
+        super(RoomInfoDialogStatusTest, self).tearDown()
+
+    def test_no_supervisor_keeps_username(self):
+        wtwin.bridge.supervisor = None
+        room = watchtogether.Room({
+            "id": "r",
+            "users": [{"id": 1, "username": "otherviewer",
+                       "title": "Other Viewer"}],
+        })
+        d = wtwin.RoomInfoDialog(room=room, item=None)
+        d.peopleList = self.FakeList()
+        d._sync()
+        self.assertEqual([i.label for i in d.peopleList.items],
+                         ["Other Viewer"])
+        self.assertEqual([i.label2 for i in d.peopleList.items],
+                         ["otherviewer"])   # the username, not "Invited"

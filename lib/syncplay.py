@@ -139,16 +139,19 @@ class Latency(object):
             self.forward_delay += client_rtt - sr   # clock-skew correction
 
 
-def sync_action(local_position, remote_position, paused, forward_delay):
+def sync_action(local_position, remote_position, paused, forward_delay,
+                seek_ahead=None):
     """§6.2: decide what the player must do to converge. Pure arithmetic.
 
     Returns None (stay), ("seek", target) or ("tempo", 0.95). The 0.95 is a
     tempo change (Kodi 21+ only, feature-detected in Phase 2) — callers may
-    degrade it to a seek on older Kodi (§9).
+    degrade it to a seek on older Kodi (§9). seek_ahead overrides SEEK_AHEAD,
+    used when the player cannot do tempo catch-up.
     """
     target = remote_position + (0 if paused else forward_delay)
     diff = local_position - target
-    if diff >= SEEK_AHEAD or diff <= SEEK_BEHIND:
+    ahead = SEEK_AHEAD if seek_ahead is None else seek_ahead
+    if diff >= ahead or diff <= SEEK_BEHIND:
         return ("seek", target)
     if diff > TEMPO_DIFF:
         return ("tempo", TEMPO_RATE)
@@ -235,10 +238,11 @@ class Session(object):
                 event = entry.get("event") or {}
                 if "left" in event or "joined" in event:
                     kind = "left" if event.get("left") else "joined"
-                    if kind == "left" and is_self(key, self.identity):
-                        # §5.8: left against our own key is advisory — it is
-                        # also how the relay reaps a live-but-silent socket, so
-                        # it must not be read as a peer departure or a reconnect
+                    if is_self(key, self.identity):
+                        # §5.8: joined/left against our own key is advisory —
+                        # it is also how the relay reaps a live-but-silent
+                        # socket, so it must not be read as a peer departure,
+                        # a reconnect, or our own join toast
                         pass
                     else:
                         if kind == "left":

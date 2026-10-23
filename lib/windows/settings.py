@@ -510,6 +510,7 @@ class Settings(object):
                 ),
                 BoolSetting('watchtogether.auto_join_last', T(35051, 'Auto-join the last Watch Together room on startup'), False),
                 BoolSetting('watchtogether.show_osd_status', T(35052, 'Show Watch Together status on the video OSD'), True),
+                BoolSetting('watchtogether.pause_catchup', T(35089, 'Catch up by pausing when tempo is unavailable'), False),
             )
         ),
         'video': (
